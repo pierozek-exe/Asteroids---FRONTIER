@@ -33,6 +33,11 @@ Kill Combo, Nano Regen, do 6 beamów, Mega Hold itd. Zdolności mają rozbudowan
 Widok dopasowuje się do proporcji okna (16:9, 21:9...), więc nie ma czarnych pasów.
 Menu bazy -> SAVES: 3 sloty zapisu (nowa gra, wczytanie, kasowanie DEL). Zapisy: frontier.json (slot 1),
 frontier_2.json, frontier_3.json.
+Menu bazy -> CONTRACTS: 3 zlecenia (dostawa rudy, wydobycie z planet, kolosy, asteroidy, ekspedycja) z limitem czasu
+lotu; nagroda: kredyty + relikty, czasem artefakt.
+Menu bazy -> FRONTIER: RELICS = stałe perki za relikty i SECTOR JUMP (prestiż: nowy świat od zera, relikty za
+zarobione kredyty, rudy droższe i skały twardsze w każdym kolejnym sektorze); ARTIFACTS = 12 artefaktów w 4 zestawach
+(wypadają z kolosów i kontraktów, dają trwałe bonusy, komplet zestawu daje dodatkowy bonus).
 Menu bazy -> SETTINGS: limit FPS (60/90/120/144/240). Symulacja gry zawsze działa w tym samym tempie
 niezależnie od wybranego FPS-a - wyższy limit daje tylko płynniejszy obraz, nie przyspiesza gry.
 """
@@ -228,7 +233,10 @@ def write_render_fps(n):
 def default_save():
     return {"seed": WORLD_SEED, "credits": 0, "levels": {}, "owned": ["scout"], "ship": "scout",
             "base": {m["key"]: 0 for m in BASE_MODULES}, "project": None, "vault": 0.0,
-            "drones": 0, "drone_tech": 0, "saved_at": 0.0}
+            "drones": 0, "drone_tech": 0, "saved_at": 0.0,
+            # endgame (sektor, relikty i artefakty zostają po skoku do nowego sektora)
+            "sector": 1, "relics": 0, "relic_lv": {}, "artifacts": [], "earned": 0.0, "far": 0.0,
+            "seen": ["iron"], "contracts": []}
 
 
 def load_save(path, upgrade_keys, ship_ids):
@@ -249,6 +257,16 @@ def load_save(path, upgrade_keys, ship_ids):
         data["drones"] = max(0, min(len(DRONE_COSTS), int(raw.get("drones", 0))))
         data["drone_tech"] = max(0, min(len(DRONE_TECH_COSTS), int(raw.get("drone_tech", 0))))
         data["saved_at"] = float(raw.get("saved_at", 0.0))
+        data["sector"] = max(1, int(raw.get("sector", 1)))
+        data["relics"] = max(0, int(raw.get("relics", 0)))
+        data["relic_lv"] = {p["key"]: max(0, min(len(p["costs"]), int(raw.get("relic_lv", {}).get(p["key"], 0))))
+                            for p in RELIC_PERKS}
+        ids = {a[0] for a in ARTIFACTS}
+        data["artifacts"] = [a for a in dict.fromkeys(raw.get("artifacts", [])) if a in ids]
+        data["earned"] = max(0.0, float(raw.get("earned", 0.0)))
+        data["far"] = max(0.0, float(raw.get("far", 0.0)))
+        data["seen"] = [k for k in ORE_KINDS if k in raw.get("seen", []) or k == "iron"]
+        data["contracts"] = [c for c in raw.get("contracts", []) if isinstance(c, dict) and c.get("type") in CONTRACT_TIME]
         pr = raw.get("project")
         if isinstance(pr, dict) and pr.get("key") in {m["key"] for m in BASE_MODULES}:
             m = module_by_key(pr["key"])
@@ -935,6 +953,157 @@ class Ore:
                 canvas.fill(WHITE, (x, y, 1, 1))
 
 
+# --------------------
+# Planety: nieregularny brzeg i wystające kryształy / bryły rudy (dorysowywane do arkusza przy starcie)
+# --------------------
+PLANET_PAD = 32            # o tyle powiększamy obrazek planety z każdej strony, żeby zmieściły się wystające kryształy
+OUTCROP = {  # rampa (ciemny -> jasny), styl: prism = kryształy, shard = cienkie odłamki, chunk = kanciaste bryły
+    "iron": ([(93, 39, 60), (160, 70, 50), (239, 125, 87), (255, 190, 140)], "chunk", False),
+    "crystal": ([(30, 80, 120), (56, 170, 200), (115, 239, 247), (230, 255, 255)], "prism", False),
+    "gold": ([(130, 70, 40), (210, 140, 50), (255, 205, 117), (255, 250, 210)], "chunk", False),
+    "titanium": ([(70, 80, 105), (140, 155, 180), (200, 215, 235), (250, 252, 255)], "shard", False),
+    "emerald": ([(20, 70, 50), (37, 130, 80), (56, 200, 110), (180, 255, 170)], "prism", False),
+    "plasma": ([(90, 30, 90), (170, 60, 160), (230, 100, 210), (255, 200, 250)], "prism", True),
+    "voidium": ([(40, 20, 80), (90, 50, 170), (150, 100, 255), (225, 205, 255)], "prism", True),
+}
+DEAD_RAMP = [(26, 28, 44), (51, 60, 87), (86, 100, 124), (130, 146, 166)]
+LIGHT2 = (-0.6, -0.8)      # kierunek światła na arkuszu planet (z lewej-góry)
+
+
+def _shade(c, f):
+    return tuple(max(0, min(255, int(v * f))) for v in c[:3])
+
+
+def rugged_planet(img, kind, variant, depleted):
+    """Zwraca większy obrazek planety: garby i wyszczerbienia na brzegu + klastry kryształów / rudy.
+    Kryształy na nocnej stronie planety są przyciemnione (świecące rodzaje świecą zawsze)."""
+    rng = random.Random(ORE_KINDS.index(kind) * 31 + variant * 7 + 5)   # deterministycznie: stały wygląd planet
+    S = img.get_width() + 2 * PLANET_PAD
+    out = pygame.Surface((S, S), pygame.SRCALPHA)
+    out.blit(img, (PLANET_PAD, PLANET_PAD))
+    c = S / 2
+    R = img.get_bounding_rect().width / 2
+    ramp, style, glows = OUTCROP[kind]
+    if depleted:
+        ramp, glows = DEAD_RAMP, False
+
+    def lit(a):
+        """Oświetlenie planety w kierunku a: 1 = strona dzienna, 0 = noc."""
+        return max(0.0, min(1.0, 0.55 + 0.9 * (math.cos(a) * LIGHT2[0] + math.sin(a) * LIGHT2[1])))
+
+    def sample(a, r):
+        x, y = int(c + math.cos(a) * r), int(c + math.sin(a) * r)
+        return out.get_at((x, y))
+
+    # 1) nierówny brzeg: promień zmienia się z kątem (suma kilku sinusów), teren "wylewa się" lub zapada
+    ph = [rng.uniform(0, math.tau) for _ in range(3)]
+    amp = (2.6, 1.8, 1.1)
+
+    def edge(a):
+        return R - 1 + amp[0] * math.sin(3 * a + ph[0]) + amp[1] * math.sin(7 * a + ph[1]) + amp[2] * math.sin(15 * a + ph[2])
+
+    src = out.copy()
+    n_ang = 1600
+    for i in range(n_ang):
+        a = i * math.tau / n_ang
+        ca, sa = math.cos(a), math.sin(a)
+        e = edge(a)
+        fill = src.get_at((int(c + ca * (R - 9)), int(c + sa * (R - 9))))
+        for r in range(int(R - 7), int(R + 7)):
+            p = (int(c + ca * r), int(c + sa * r))
+            if r > e:
+                out.set_at(p, (0, 0, 0, 0))
+            elif src.get_at(p).a == 0 or r > R - 3:
+                out.set_at(p, fill)
+    for i in range(n_ang):   # obrys nowego brzegu
+        a = i * math.tau / n_ang
+        r = int(edge(a))
+        p = (int(c + math.cos(a) * r), int(c + math.sin(a) * r))
+        out.set_at(p, (20, 20, 34, 255))
+
+    def prism(bx, by, a, length, width, shade):
+        """Graniastosłup: dwie ściany (oświetlona i w cieniu), grzbiet i jasny czubek."""
+        dx, dy = math.cos(a), math.sin(a)
+        nx, ny = -dy, dx
+        tip = (bx + dx * length, by + dy * length)
+        sL = (bx + dx * length * 0.72 + nx * width * 0.5, by + dy * length * 0.72 + ny * width * 0.5)
+        sR = (bx + dx * length * 0.72 - nx * width * 0.5, by + dy * length * 0.72 - ny * width * 0.5)
+        bL = (bx + nx * width * 0.5, by + ny * width * 0.5)
+        bR = (bx - nx * width * 0.5, by - ny * width * 0.5)
+        mid = (bx + dx * length * 0.72, by + dy * length * 0.72)
+        left_lit = nx * LIGHT2[0] + ny * LIGHT2[1] > 0
+        t = lambda i: (*_shade(ramp[max(0, min(3, i))], shade), 255)
+        pygame.draw.polygon(out, (20, 20, 34), [bL, sL, tip, sR, bR], 0)
+        pygame.draw.polygon(out, (20, 20, 34), [bL, sL, tip, sR, bR], 2)
+        pygame.draw.polygon(out, t(2 if left_lit else 1), [bL, sL, tip, mid, (bx, by)])
+        pygame.draw.polygon(out, t(1 if left_lit else 2), [(bx, by), mid, tip, sR, bR])
+        pygame.draw.line(out, t(3), (bx, by), tip)
+        pygame.draw.line(out, t(3), mid, tip, 2 if width > 6 else 1)
+        return tip
+
+    def chunk(bx, by, a, size, shade):
+        """Kanciasta bryła rudy: nieregularny wielokąt z jasną górną-lewą krawędzią."""
+        pts = []
+        n = rng.randint(5, 7)
+        for i in range(n):
+            ang = a + i * math.tau / n + rng.uniform(-0.3, 0.3)
+            rr = size * rng.uniform(0.6, 1.0)
+            pts.append((bx + math.cos(ang) * rr, by + math.sin(ang) * rr * 0.85))
+        t = lambda i: (*_shade(ramp[max(0, min(3, i))], shade), 255)
+        pygame.draw.polygon(out, (20, 20, 34), pts, 0)
+        pygame.draw.polygon(out, (20, 20, 34), pts, 2)
+        inner = [(bx + (x - bx) * 0.85, by + (y - by) * 0.85) for x, y in pts]
+        pygame.draw.polygon(out, t(1), inner)
+        lit_pts = [(bx + (x - bx) * 0.7 + LIGHT2[0] * size * 0.18, by + (y - by) * 0.7 + LIGHT2[1] * size * 0.18)
+                   for x, y in pts]
+        pygame.draw.polygon(out, t(2), lit_pts)
+        hx, hy = bx + LIGHT2[0] * size * 0.4, by + LIGHT2[1] * size * 0.4
+        pygame.draw.circle(out, t(3), (hx, hy), max(1, size * 0.18))
+        return hx, hy
+
+    glow_layer = pygame.Surface((S, S), pygame.SRCALPHA) if glows else None
+    tips = []
+    # 3) klastry na brzegu: sterczą na zewnątrz i łamią okrągły kształt
+    n_rim = rng.randint(4, 6)
+    base_a = rng.uniform(0, math.tau)
+    for i in range(n_rim):
+        a = base_a + i * math.tau / n_rim + rng.uniform(-0.35, 0.35)
+        shade = 0.4 + 0.6 * lit(a)
+        bx, by = c + math.cos(a) * (R - 8), c + math.sin(a) * (R - 8)
+        for j in range(rng.randint(3, 4)):
+            aa = a + rng.uniform(-0.5, 0.5) * (0.4 if j == 0 else 1.0)
+            ox, oy = rng.uniform(-5, 5), rng.uniform(-5, 5)
+            if style == "chunk":
+                size = rng.uniform(8, 14) * (0.55 if depleted else 1.0)
+                tips.append(chunk(bx + ox + math.cos(aa) * size * 0.6, by + oy + math.sin(aa) * size * 0.6, aa, size, shade))
+            else:
+                length = (rng.uniform(26, 38) if j == 0 else rng.uniform(14, 26)) * (1.0 if style == "prism" else 0.8)
+                width = rng.uniform(8, 12) if style == "prism" else rng.uniform(4, 6)
+                if depleted:
+                    length *= 0.35
+                tips.append(prism(bx + ox, by + oy, aa, length, width, shade))
+    # 4) mniejsze wychodnie na oświetlonej powierzchni (patrzymy z góry, więc są krótsze)
+    for _ in range(rng.randint(2, 3)):
+        a = rng.uniform(math.radians(160), math.radians(290))
+        r = rng.uniform(0.25, 0.7) * R
+        bx, by = c + math.cos(a) * r, c + math.sin(a) * r
+        for j in range(rng.randint(2, 3)):
+            aa = a + rng.uniform(-0.8, 0.8)
+            if style == "chunk":
+                tips.append(chunk(bx + rng.uniform(-4, 4), by + rng.uniform(-4, 4), aa, rng.uniform(6, 9), 1.0))
+            else:
+                tips.append(prism(bx + rng.uniform(-3, 3), by + rng.uniform(-3, 3), aa,
+                                  rng.uniform(12, 18) * (0.4 if depleted else 1.0), rng.uniform(6, 8), 1.0))
+    if glow_layer is not None:   # poświata świecących kryształów (widoczna także na nocnej stronie)
+        col = ramp[2]
+        for x, y in tips:
+            for rr, al in ((10, 26), (6, 40), (3, 70)):
+                pygame.draw.circle(glow_layer, (*col, al), (x, y), rr)
+        glow_layer.blit(out, (0, 0))
+        out = glow_layer
+    return out
+
+
 class Planet:
     """Mini-planeta z surowcem. Kolejne trafienia wykuwają bryłki, aż zasób się wyczerpie."""
 
@@ -1311,7 +1480,7 @@ def module_by_key(key):
 
 def income_rate(base):
     """Pasywny dochód (kredytów/min): Drill Rigs razy mnożnik Orbital Ring."""
-    return DRILL_INCOME[base["drill"]] * RING_MULT[base["ring"]]
+    return int(round(DRILL_INCOME[base["drill"]] * RING_MULT[base["ring"]] * META_MULT["income"]))
 
 
 def vault_cap(base):
@@ -1469,6 +1638,150 @@ BASE_OBJ = SimpleNamespace(x=0.0, y=0.0, R=BASE_R)
 MISSILE_TRAIL = (YELLOW, ORANGE, RED, PLUM, DARK)
 
 
+# --------------------
+# Endgame: sektory (prestiż), relikty, kontrakty i artefakty
+# --------------------
+JUMP_MIN_RELICS = 3        # skok do nowego sektora jest możliwy, gdy da co najmniej tyle reliktów
+RELIC_DIVISOR = 50000      # relikty za skok = sqrt(zarobione kredyty / RELIC_DIVISOR)
+SECTOR_ORE_BONUS = 0.25    # każdy kolejny sektor: rudy droższe o 25%...
+SECTOR_HP_BONUS = 0.35     # ...ale asteroidy twardsze o 35%
+ARTIFACT_CHANCE = 0.10     # szansa na artefakt z kolosa (+2 pkt. proc. za każdy kolejny sektor)
+DUPLICATE_RELICS = 3       # znaleziony duplikat artefaktu zamienia się w relikty
+
+RELIC_PERKS = [  # stałe ulepszenia za relikty (zostają po skoku)
+    dict(key="legacy", name="PROSPECTOR LEGACY", costs=(1, 2, 4, 7, 12), info="ORE PRICE +15% PER LEVEL"),
+    dict(key="holds", name="BIG HOLDS", costs=(1, 2, 4, 7, 12), info="CARGO HOLD +15% PER LEVEL"),
+    dict(key="auto", name="AUTOMATION", costs=(2, 3, 5, 8, 13), info="PASSIVE INCOME + DRONE LOADS +25% PER LEVEL"),
+    dict(key="pilot", name="VETERAN PILOT", costs=(1, 3, 5, 8, 12), info="ENGINE + FIRE RATE +6% PER LEVEL"),
+    dict(key="start", name="HEAD START", costs=(2, 4, 7, 11, 16), info="START EVERY NEW SECTOR WITH CREDITS"),
+    dict(key="charter", name="FLEET CHARTER", costs=(10,), info="KEEP YOUR SHIPS AFTER A SECTOR JUMP"),
+]
+HEAD_START = (0, 5000, 20000, 80000, 300000, 1000000)
+
+ARTIFACTS = [  # (id, nazwa, zestaw, statystyka, wartość)
+    ("ion_coil", "ION COIL", "drive", "engine", 0.10),
+    ("gyro", "GYRO CORE", "drive", "turn", 0.20),
+    ("chrono", "CHRONO SHARD", "drive", "cooldown", 0.15),
+    ("lens", "STARFORGE LENS", "forge", "fire", 0.10),
+    ("aegis", "AEGIS PLATE", "forge", "shield", 1),
+    ("fang", "COLOSSUS FANG", "forge", "loot", 0.20),
+    ("pocket", "POCKET SPACE", "core", "cargo", 0.20),
+    ("bit", "CORE DRILL BIT", "core", "mine", 1),
+    ("hive", "HIVE MIND CHIP", "core", "drone", 0.25),
+    ("ledger", "GUILD LEDGER", "guild", "price", 0.10),
+    ("lodestone", "LODESTONE", "guild", "magnet", 0.40),
+    ("seal", "MERCHANT SEAL", "guild", "income", 0.30),
+]
+ARTIFACT_SETS = {  # komplet 3 artefaktów z zestawu daje dodatkowy bonus
+    "drive": ("PRECURSOR DRIVE", "warp", 1),
+    "forge": ("STARFORGE ARMS", "fire", 0.15),
+    "core": ("DEEP CORE", "cargo", 0.25),
+    "guild": ("TRADE GUILD", "price", 0.15),
+}
+STAT_LABEL = {"engine": "ENGINE", "turn": "TURN RATE", "cooldown": "ABILITY COOLDOWN", "fire": "FIRE RATE",
+              "shield": "SHIELD", "loot": "ASTEROID LOOT", "cargo": "CARGO HOLD", "mine": "ORE PER PLANET HIT",
+              "drone": "DRONE LOADS", "price": "ORE PRICE", "magnet": "MAGNET RANGE", "income": "PASSIVE INCOME",
+              "warp": "WARP HOME CHARGE"}
+META_MULT = {"income": 1.0}   # mnożnik dochodu pasywnego (odświeżany przez refresh_meta)
+
+
+def stat_text(stat, val):
+    if stat == "cooldown":
+        return f"{STAT_LABEL[stat]} -{val:.0%}"
+    if isinstance(val, int):
+        return f"+{val} {STAT_LABEL[stat]}"
+    return f"{STAT_LABEL[stat]} +{val:.0%}"
+
+
+def artifact_by_id(aid):
+    return next(a for a in ARTIFACTS if a[0] == aid)
+
+
+def meta_bonus(save, stat):
+    """Suma trwałych bonusów (artefakty, komplety zestawów, perki za relikty) dla danej statystyki."""
+    found = set(save["artifacts"])
+    v = sum(a[4] for a in ARTIFACTS if a[0] in found and a[3] == stat)
+    for set_key, (_, s_stat, s_val) in ARTIFACT_SETS.items():
+        if s_stat == stat and all(a[0] in found for a in ARTIFACTS if a[2] == set_key):
+            v += s_val
+    rl = save["relic_lv"]
+    v += {"price": 0.15 * rl.get("legacy", 0), "cargo": 0.15 * rl.get("holds", 0),
+          "income": 0.25 * rl.get("auto", 0), "drone": 0.25 * rl.get("auto", 0),
+          "engine": 0.06 * rl.get("pilot", 0), "fire": 0.06 * rl.get("pilot", 0)}.get(stat, 0)
+    return v
+
+
+def refresh_meta(save):
+    META_MULT["income"] = 1.0 + meta_bonus(save, "income")
+
+
+def sector_ore_mult(save):
+    return 1.0 + SECTOR_ORE_BONUS * (save["sector"] - 1)
+
+
+def sector_hp_mult(save):
+    return 1.0 + SECTOR_HP_BONUS * (save["sector"] - 1)
+
+
+def relics_for(earned):
+    return int(math.sqrt(max(0.0, earned) / RELIC_DIVISOR))
+
+
+# kontrakty: (typ, sekundy lotu na wykonanie); czas biegnie tylko w locie
+CONTRACT_TIME = {"deliver": 480, "planet": 480, "colossus": 600, "rocks": 360, "expedition": 420}
+
+
+def new_contract(save):
+    """Losowa oferta dopasowana do postępu gracza (znane surowce, ładownia, najdalszy lot)."""
+    seen = [k for k in ORE_KINDS if k in save["seen"]] or ["iron"]
+    cap = CARGO_CAP[save["levels"].get("cargo", 0)]
+    best = max(ORE[k]["value"] for k in seen)
+    wealth = max(cap, 60) * best * sector_ore_mult(save)   # mniej więcej wartość jednej pełnej ładowni
+    typ = random.choice(("deliver", "deliver", "planet", "colossus", "rocks", "expedition"))
+    c = dict(type=typ, kind=None, n=0, got=0, on=False, relics=1, art=random.random() < 0.25)
+    if typ in ("deliver", "planet"):
+        kind = random.choice(seen[-3:])   # raczej lepsze z poznanych surowców
+        c["kind"] = kind
+        c["n"] = max(10, int(round(cap * random.uniform(0.5, 1.1) / 10.0)) * 10)
+        c["reward"] = int(c["n"] * ORE[kind]["value"] * sector_ore_mult(save) * (3.0 if typ == "deliver" else 2.5))
+    elif typ == "colossus":
+        c["n"] = random.randint(1, 3)
+        c["reward"] = int(wealth * 1.5 * c["n"])
+        c["relics"] = 1 + (c["n"] >= 2)
+    elif typ == "rocks":
+        c["n"] = random.choice((40, 60, 80, 120))
+        c["reward"] = int(wealth * c["n"] / 40)
+    else:
+        c["n"] = int(max(PLANET_MIN_D * 1.4, save["far"] * 1.15) // 1000 * 1000)   # odległość od bazy (logika)
+        c["reward"] = int(wealth * 2.5)
+        c["relics"] = 2
+    c["reward"] = max(200, c["reward"])
+    c["left"] = c["time"] = CONTRACT_TIME[typ]
+    return c
+
+
+def contract_title(c):
+    if c["type"] == "deliver":
+        return f"DELIVER {c['n']} {ORE[c['kind']]['name']}"
+    if c["type"] == "planet":
+        return f"MINE {c['n']} {ORE[c['kind']]['name']} FROM PLANETS"
+    if c["type"] == "colossus":
+        return f"DESTROY {c['n']} COLOSS{'I' if c['n'] > 1 else 'US'}"
+    if c["type"] == "rocks":
+        return f"DESTROY {c['n']} ASTEROIDS"
+    return f"REACH {c['n'] // 100}KM FROM BASE"
+
+
+def contract_reward_text(c):
+    s = f"{short_cr(c['reward'])} CR + {c['relics']} RELIC{'S' if c['relics'] > 1 else ''}"
+    return s + (" + ARTIFACT" if c["art"] else "")
+
+
+def mmss(secs):
+    secs = max(0, int(secs))
+    return f"{secs // 60}:{secs % 60:02d}"
+
+
 def main():
     pygame.init()
     pygame.display.set_caption("Asteroids: Frontier")
@@ -1499,6 +1812,7 @@ def main():
     save = load_save(slot_path(active_slot), upgrade_keys, ship_ids)
     WORLD.seed = save["seed"]  # każdy zapis ma własny świat
     WORLD.reset()
+    refresh_meta(save)
     if "--credits" in sys.argv:
         try:
             save["credits"] += int(sys.argv[sys.argv.index("--credits") + 1])
@@ -1516,12 +1830,13 @@ def main():
         frames = [sheet.subsurface((i * fw, 0, fw, sheet.get_height())).copy() for i in range(count)]
         return Animation(frames, speed)
 
-    def planet_sheet(name):
+    def planet_sheet(name, depleted=False):
         sheet = load(name)
         out = {}
         for row, kind in enumerate(ORE_KINDS):
             for v in range(2):
-                out[(kind, v)] = sheet.subsurface((v * 192, row * 192, 192, 192)).copy()
+                cell = sheet.subsurface((v * 192, row * 192, 192, 192)).copy()
+                out[(kind, v)] = rugged_planet(cell, kind, v, depleted).convert_alpha()
         return out
 
     bg_src = pygame.image.load(str(PIXEL / "space_bg_big.png")).convert()
@@ -1549,7 +1864,7 @@ def main():
     base_img = load("base_planet.png")
     bld_img = {k: load(f"bld_{k}.png") for k in ("drill", "refinery", "vault", "hq", "scanner", "trade", "shield",
                                                  "warp", "engine")}
-    planet_img, dead_img = planet_sheet("planets.png"), planet_sheet("planets_depleted.png")
+    planet_img, dead_img = planet_sheet("planets.png"), planet_sheet("planets_depleted.png", depleted=True)
     s_explosion = strip("explosion.png", 48, 0.5)
     s_rock = strip("rock.png", 16, 0.2)
     s_rock_small = strip("rock_small.png", 16, 0.2)
@@ -1607,10 +1922,12 @@ def main():
         flash=0, flash_col=WHITE, react_fx=0, scan_ping_cd=0.0, well_ping_cd=0.0, dust_cd=0.0, unload_cd=0.0, vault_done=False,
         fps_sel=RENDER_FPS_OPTIONS.index(render_fps),
         div={k: 0 for k in ORE_KINDS}, div_t={k: 0 for k in ORE_KINDS}, sold_f=0.0, vault_got=0,
-        notice=["", WHITE, 0], toast=["", WHITE, 0],
+        notice=["", WHITE, 0], toast=["", WHITE, 0], toast_q=[],
+        ct_sel=0, fr_tab=0, fr_sel=0, jump_confirm=0.0,
     )
     S.entities, S.ores = entities, ores  # dla testów i podglądu
-    menu_items = ["LAUNCH", "UPGRADES", "SPECIALS", "HANGAR", "BASE", "SAVES", "SETTINGS", "EXIT GAME"]
+    menu_items = ["LAUNCH", "CONTRACTS", "UPGRADES", "SPECIALS", "HANGAR", "BASE", "FRONTIER", "SAVES", "SETTINGS",
+                  "EXIT GAME"]
 
     def ship_by_id(sid):
         return next(s for s in SHIPS if s["id"] == sid)
@@ -1644,6 +1961,8 @@ def main():
     # ---------- ekonomia ----------
     def add_credits(x):
         """Dodaje (ułamkowe) kredyty; reszta ułamkowa czeka na kolejne wpłaty."""
+        if x > 0:
+            save["earned"] += x   # zarobek w tym sektorze -> relikty za skok
         S.frac += x
         whole = int(S.frac)
         if whole:
@@ -1662,7 +1981,7 @@ def main():
         if project_need(kind) > 0:
             save["project"]["progress"][kind] += 1
             return "proj", 0.0
-        v = ORE[kind]["value"] * sale_mult(save["base"])
+        v = ORE[kind]["value"] * sale_mult(save["base"]) * sector_ore_mult(save) * (1 + meta("price"))
         add_credits(v)
         return "sold", v
 
@@ -1679,6 +1998,110 @@ def main():
             return f"{m['name']} UPGRADED TO LV {lvl + 1}!"
         return None
 
+    # ---------- endgame: kontrakty, artefakty, skok do nowego sektora ----------
+    def meta(stat):
+        return meta_bonus(save, stat)
+
+    def notify(msg, col):
+        """Komunikat: w locie jako toast (kolejka, żeby się nie nadpisywały), w bazie w liniach menu."""
+        if S.state in ("flight", "paused"):
+            if S.toast[2] > 0:
+                S.toast_q.append((msg, col))
+            else:
+                set_toast(msg, col, 220)
+        else:
+            S.lines.append((msg, col))
+            del S.lines[:-4]
+
+    def fill_contracts():
+        while len(save["contracts"]) < 3:
+            save["contracts"].append(new_contract(save))
+
+    def grant_artifact(x=None, y=None):
+        missing = [a for a in ARTIFACTS if a[0] not in save["artifacts"]]
+        if not missing:
+            save["relics"] += DUPLICATE_RELICS
+            notify(f"DUPLICATE ARTIFACT  +{DUPLICATE_RELICS} RELICS", (210, 184, 255))
+        else:
+            a = random.choice(missing)
+            save["artifacts"].append(a[0])
+            refresh_meta(save)
+            done = all(b[0] in save["artifacts"] for b in ARTIFACTS if b[2] == a[2])
+            notify(f"ARTIFACT: {a[1]}  ({stat_text(a[3], a[4])})", (210, 184, 255))
+            if done:
+                notify(f"SET COMPLETE: {ARTIFACT_SETS[a[2]][0]}!", LIME)
+            if x is not None:
+                floats.append([x, y - 60, a[1], (210, 184, 255), 110])
+                fx.append(FxRing(x, y, 30, 420, 34, ((210, 184, 255), WHITE), 3, "hex", spin=0.4))
+                glow(x, y, 40, 260, 30, (150, 100, 255), 1.0)
+        persist()
+
+    def finish_contract(c):
+        save["contracts"].remove(c)
+        add_credits(c["reward"])
+        save["relics"] += c["relics"]
+        notify(f"CONTRACT DONE  +{short_cr(c['reward'])} CR  +{c['relics']} RELIC{'S' if c['relics'] > 1 else ''}", LIME)
+        if c["art"]:
+            grant_artifact()
+        fill_contracts()
+        persist()
+
+    def contract_progress(typ, n=1, kind=None):
+        for c in list(save["contracts"]):
+            if c["on"] and c["type"] == typ and (kind is None or c["kind"] == kind):
+                c["got"] = min(c["n"], c["got"] + n)
+                if c["got"] >= c["n"]:
+                    finish_contract(c)
+
+    def contracts_tick(dt, dist):
+        """Czas kontraktów płynie tylko w locie; ekspedycja zalicza się po dotarciu na odległość."""
+        save["far"] = max(save["far"], dist)
+        for c in list(save["contracts"]):
+            if not c["on"]:
+                continue
+            if c["type"] == "expedition":
+                c["got"] = max(c["got"], int(dist))
+                if dist >= c["n"]:
+                    finish_contract(c)
+                    continue
+            c["left"] -= dt
+            if c["left"] <= 0:
+                save["contracts"].remove(c)
+                notify(f"CONTRACT FAILED: {contract_title(c)}", RED)
+                fill_contracts()
+
+    def buy_relic_perk(i):
+        pk = RELIC_PERKS[i]
+        lvl = save["relic_lv"].get(pk["key"], 0)
+        if lvl >= len(pk["costs"]):
+            set_notice("ALREADY AT MAX", ORANGE)
+            return
+        cost = pk["costs"][lvl]
+        if save["relics"] < cost:
+            set_notice(f"NEED {cost} RELICS", RED)
+            return
+        save["relics"] -= cost
+        save["relic_lv"][pk["key"]] = lvl + 1
+        refresh_meta(save)
+        persist()
+        set_notice("PERK UPGRADED!", LIME)
+
+    def sector_jump():
+        """Prestiż: nowy świat od zera, ale relikty, perki i artefakty zostają (a rudy są droższe)."""
+        gain = relics_for(save["earned"])
+        rl = dict(save["relic_lv"])
+        d = new_game_data()
+        d.update(sector=save["sector"] + 1, relics=save["relics"] + gain, relic_lv=rl,
+                 artifacts=list(save["artifacts"]), credits=HEAD_START[rl.get("start", 0)])
+        if rl.get("charter"):   # Fleet Charter: statki zostają (bez ulepszeń)
+            d["owned"], d["ship"] = list(save["owned"]), save["ship"]
+        apply_save(d)
+        refresh_meta(save)
+        fill_contracts()
+        persist()
+        S.lines = [(f"WELCOME TO SECTOR {save['sector']}!  +{gain} RELICS", (210, 184, 255))]
+        S.state, S.sel = "base", 0
+
     def sync_drones():
         while len(S.drones) < save["drones"]:
             secs = DRONE_TECH[save["drone_tech"]][1]
@@ -1690,12 +2113,13 @@ def main():
         dt = real_dt   # rzeczywisty upływ czasu tej klatki (nie zakładane 1/60), więc tempo nie zależy od FPS
         rate = income_rate(save["base"]) / 60.0
         if rate > 0:
-            if S.state in ("base", "specials", "saves", "upgrades", "hangar", "build"):
+            if S.state in ("base", "specials", "saves", "upgrades", "hangar", "build", "contracts", "frontier"):
                 add_credits(rate * dt)
             else:
                 save["vault"] = min(float(vault_cap(save["base"])), save["vault"] + rate * dt)
         sync_drones()
         units, secs, mix = DRONE_TECH[save["drone_tech"]]
+        units = int(units * (1 + meta("drone")))
         for d in S.drones:
             d["t"] -= dt
             if d["t"] > 0:
@@ -1933,7 +2357,7 @@ def main():
             anim, radius = (s_rock_gold if gold else s_rock), 25
             hp = base * 2 + 1 if gold else base
         a.settings(anim, x, y, angle, radius)
-        a.hp = a.max_hp = hp
+        a.hp = a.max_hp = int(math.ceil(hp * sector_hp_mult(save)))   # kolejne sektory: twardsze skały
         a.base, a.gold, a.tier = base, gold, tier
         a.ore = ore or ("gold" if gold else "iron")
         if tier == "colossus":  # kolosy dryfują powoli
@@ -1989,9 +2413,15 @@ def main():
             mult = (3 if sl >= 6 else 2) if (scanning() and sl >= 2) else 1
             if S.ship["id"] == "scout":  # Salvage Crew
                 mult *= 1 + SALVAGE_BONUS * save["levels"]["salvage"]
+            mult *= 1 + meta("loot")   # artefakt Colossus Fang
             kind = a.ore
             spawn_ore(a.x, a.y, kind, max(1, int(math.ceil(ROCK_UNITS[kind][a.tier] * mult))),
                       spread=6.0 if colossus else 3.0, chunk=10 if colossus else 6)
+        contract_progress("rocks")
+        if colossus:
+            contract_progress("colossus")
+            if random.random() < ARTIFACT_CHANCE + 0.02 * (save["sector"] - 1):
+                fx.append(Timer(40, lambda x=a.x, y=a.y: grant_artifact(x, y)))
         if S.ship["id"] == "striker" and save["levels"]["combo"] > 0:  # Kill Combo
             S.combo = min(COMBO_MAX[save["levels"]["combo"]], S.combo + 1)
             S.combo_t = COMBO_FRAMES
@@ -2024,6 +2454,9 @@ def main():
         kind = a.ore
         n = ROCK_UNITS[kind][a.tier] * 2
         n = max(1, int(round(n * BEAM_YIELD[save["levels"]["beam"]])))
+        contract_progress("rocks")
+        if a.tier == "colossus":
+            contract_progress("colossus")
         p = S.player
         ti = int(round(n * REFINE_CHANCE[save["levels"]["refine"]])) if kind == "iron" else 0  # Ore Refiner
         got = add_cargo(kind, n - ti)
@@ -2051,9 +2484,11 @@ def main():
             bonus = S.ship["mine_bonus"] + (save["levels"]["prospect"] if S.ship["id"] == "surveyor" else 0)
             if scanning() and save["levels"]["scan"] >= 5:
                 bonus += 2   # Deep Scan poziomu 5: podczas skanu dodatkowe bryłki
+            bonus += int(meta("mine"))   # artefakt Core Drill Bit
             total = n + bonus * MINE_YIELD  # Surveyor dokłada darmowe jednostki (ulepszalne)
             spawn_ore(pl.x + ux * (pl.R + 8), pl.y + uy * (pl.R + 8), pl.kind, total, vx, vy, spread=1.0,
                       chunk=max(total, 1))
+            contract_progress("planet", total, pl.kind)
             burst(b.x, b.y, 4, (WHITE, col, col), speed=2.5, life=12)
             if pl.depleted:
                 set_toast("PLANET DEPLETED", GREY, 120)
@@ -2097,7 +2532,8 @@ def main():
             b.maxage = bullet_life()
             b.ivx, b.ivy = p.dx, p.dy
             entities.append(b)
-        S.fire_cd = fire_rate_of(lv["fire"]) * fire_mult() * (0.4 if od else 1.0) / (1 + COMBO_STEP * S.combo)
+        S.fire_cd = (fire_rate_of(lv["fire"]) * fire_mult() * (0.4 if od else 1.0) / (1 + COMBO_STEP * S.combo)
+                     / (1 + meta("fire")))
         rad = p.angle * DEGTORAD
         fx_muzzle(p.x + math.cos(rad) * (ship["radius"] + 6), p.y + math.sin(rad) * (ship["radius"] + 6), rad, od)
 
@@ -2193,7 +2629,7 @@ def main():
     def ability_cd(ab):
         L = save["levels"]
         return {"dash": DASH_CD[L["dash"]], "overdrive": OVERDRIVE_CD[L["overdrive"]], "scan": SCAN_CD[L["scan"]],
-                "pulse": WELL_CD[L["pulse"]], "repair": REPAIR_CD[L["repair"]]}[ab]
+                "pulse": WELL_CD[L["pulse"]], "repair": REPAIR_CD[L["repair"]]}[ab] * (1 - meta("cooldown"))
 
     def scan_mult():
         return SCAN_MULTS[save["levels"]["scan"]]
@@ -2253,10 +2689,10 @@ def main():
         px, py = pad_pos(S.pad)
         p = Player()
         p.settings(ship_anims[ship["id"]][1], px, py, math.degrees(pad_angle(S.pad)), ship["radius"])
-        eb = 1.0 + ENGINE_BONUS * save["base"]["engine"]   # Engine Lab
+        eb = (1.0 + ENGINE_BONUS * save["base"]["engine"]) * (1 + meta("engine"))   # Engine Lab, artefakty, perki
         p.speed = engine_of(lv["engine"]) * ship["speed"] * SHIP_SPEED_MULT * eb
         p.max_speed = 15 * ship["speed"] * SHIP_SPEED_MULT * eb
-        p.turn = ship["turn"]
+        p.turn = ship["turn"] * (1 + meta("turn"))
         p.scale = 0.55
         entities.append(p)
         S.player = p
@@ -2266,7 +2702,7 @@ def main():
             capm *= 1 + MEGAHOLD_BONUS * lv["megahold"]
         elif ship["id"] == "harvester":
             capm *= 1 + SILO_BONUS * lv["silo"]
-        S.cap = int(CARGO_CAP[lv["cargo"]] * capm)
+        S.cap = int(CARGO_CAP[lv["cargo"]] * capm * (1 + meta("cargo")))
         S.combo = S.combo_t = S.dash_prev = 0
         S.regen_t, S.dash_rt = 0.0, 0.0
         S.dash_charges = 2 if lv["dash"] >= 5 else 1
@@ -2275,8 +2711,9 @@ def main():
         S.well_t = 0
         S.wave_queue = []
         S.turret_msl_cd = 0.0
-        S.max_shield = S.shield = lv["shield"] + ship["shields"] + save["base"]["shield"]   # Shield Grid: +1 na poziom
-        S.warps = save["base"]["warp"]
+        S.max_shield = S.shield = (lv["shield"] + ship["shields"] + save["base"]["shield"]   # Shield Grid: +1 na poziom
+                                   + int(meta("shield")))
+        S.warps = save["base"]["warp"] + int(meta("warp"))
         S.invuln = S.shake = S.phase_t = 0
         S.beam_targets = []
         S.undock_lock = True
@@ -2446,6 +2883,8 @@ def main():
         S.ship = ship_by_id(save["ship"])
         for grp in (entities, ores, particles, waves, ghosts, floats, pending, fx):
             grp.clear()
+        refresh_meta(save)
+        fill_contracts()
 
     def refresh_slots():
         S.slot_info = []
@@ -2580,25 +3019,25 @@ def main():
                 if not visible(x, y, 40):
                     continue
                 screen.blit(img, img.get_rect(center=(x, y)))
-                if key == "drill":
-                    screen.fill(WHITE if blink ^ (idx % 2 == 0) else RED, (x, y - 10, 1, 1))
+                if key == "drill":     # lampka na szczycie wieży wiertniczej
+                    screen.fill(WHITE if blink ^ (idx % 2 == 0) else RED, (x - 2, y - 21, 1, 1))
                 elif key == "refinery":  # dym z komina
                     for j in range(3):
                         tt = (t_ms // 130 + j * 4) % 12
-                        screen.fill(GREY if tt < 6 else DARK, (x + 6 + (tt // 4) % 2, y - 10 - tt, 2 if tt < 6 else 1, 2 if tt < 6 else 1))
-                elif key == "scanner":  # migająca końcówka czaszy
-                    screen.fill(WHITE if blink ^ (idx % 2 == 0) else CYAN, (x, y - 11, 1, 1))
-                elif key == "shield":  # pulsujące pole tarczy
-                    rr = 9 + (t_ms // 120 + idx * 3) % 4
-                    pygame.draw.circle(screen, (115, 239, 247), (x, y - 6), rr, 1)
-                elif key == "warp":    # fioletowy błysk na szczycie iglicy
-                    screen.fill(WHITE if (t_ms // 200 + idx) % 2 else (210, 184, 255), (x - 1, y - 14, 2, 2))
-                elif key == "engine":  # płomień z dyszy stanowiska testowego
-                    screen.fill(YELLOW if (t_ms // 90) % 2 else ORANGE, (x + 8, y + 5, 2, 2 + (t_ms // 90) % 3))
+                        screen.fill(GREY if tt < 6 else DARK, (x + 11 + (tt // 4) % 2, y - 19 - tt, 2 if tt < 6 else 1, 2 if tt < 6 else 1))
+                elif key == "scanner":  # migająca końcówka odbiornika
+                    screen.fill(WHITE if blink ^ (idx % 2 == 0) else CYAN, (x + 6, y - 19, 1, 1))
+                elif key == "shield":  # pulsujące pole wokół rdzenia tarczy
+                    rr = 10 + (t_ms // 120 + idx * 3) % 4
+                    pygame.draw.circle(screen, (115, 239, 247), (x - 1, y - 11), rr, 1)
+                elif key == "warp":    # fioletowy błysk kryształu na szczycie iglicy
+                    screen.fill(WHITE if (t_ms // 200 + idx) % 2 else (210, 184, 255), (x - 2, y - 25, 2, 2))
+                elif key == "engine":  # płomień z dyszy stanowiska testowego (w prawo)
+                    screen.fill(YELLOW if (t_ms // 90) % 2 else ORANGE, (x + 17, y - 4, 2 + (t_ms // 90) % 3, 3))
         hq = bld_img["hq"]
         screen.blit(hq, hq.get_rect(center=(cx, cy)))
-        screen.fill(CYAN if blink else WHITE, (cx + 16, cy - 10, 1, 1))     # czasza radaru
-        screen.fill(RED if blink else ORANGE, (cx - 17, cy - 15, 1, 1))    # lampka masztu
+        screen.fill(CYAN if blink else WHITE, (cx + 22, cy - 17, 1, 1))    # czasza radaru
+        screen.fill(RED if blink else ORANGE, (cx - 26, cy - 26, 1, 1))    # lampka masztu
 
     def drone_pos(d):
         f = max(0.0, min(1.0, 1.0 - d["t"] / d["total"]))
@@ -2658,7 +3097,7 @@ def main():
 
     def draw_planet(pl):
         x, y = sp(pl.x, pl.y)
-        if not (abs(x - VW // 2) < VW // 2 + 100 and abs(y - VH // 2) < VH // 2 + 100):
+        if not (abs(x - VW // 2) < VW // 2 + 130 and abs(y - VH // 2) < VH // 2 + 130):
             return
         img = (dead_img if pl.depleted else planet_img)[(pl.kind, pl.variant)]
         if pl.flash > 0:
@@ -2806,6 +3245,14 @@ def main():
         if save["drones"]:
             text(f"DRONES {save['drones']}", 8, LIME, (6, yy))
             yy += 12
+        for c in save["contracts"]:
+            if c["on"]:
+                kn = ORE[c["kind"]]["name"] if c["kind"] else ""
+                label = {"deliver": f"DELIVER {kn}", "planet": f"MINE {kn}", "colossus": "COLOSSI",
+                         "rocks": "ASTEROIDS", "expedition": "EXPEDITION"}[c["type"]]
+                prog = f"{c['got'] // 100}/{c['n'] // 100}KM" if c["type"] == "expedition" else f"{c['got']}/{c['n']}"
+                text(f"{label} {prog} {mmss(c['left'])}", 8, RED if c["left"] < 60 else (210, 184, 255), (6, yy))
+                yy += 12
         if S.combo > 1:
             text(f"COMBO X{S.combo}", 8, ORANGE, (6, yy))
         text("ESC - PAUSE", 8, GREY, (CW - 6, CH - 14), right=True)
@@ -2834,8 +3281,10 @@ def main():
         if S.ship["id"] == "heavy" and lv["turret"]:
             text(f"AUTO TURRET LV {lv['turret']}", 8, ORANGE, (6, CH - 14 - n_above * 12))
             n_above += 1
-        if save["base"]["warp"]:
+        if save["base"]["warp"] or meta("warp"):
             text(f"H WARP HOME x{S.warps}", 8, LIME if S.warps else GREY, (6, CH - 14 - n_above * 12))
+        if S.toast[2] <= 0 and S.toast_q:
+            set_toast(*S.toast_q.pop(0), 200)
         if S.toast[2] > 0:
             if S.toast[2] > 30 or (int(S.toast[2]) // 3) % 2 == 0:
                 text(S.toast[0], 8, S.toast[1], (0, 104), center=True)
@@ -2846,6 +3295,8 @@ def main():
         p = S.player
         lv = save["levels"]
         dt = real_dt   # rzeczywisty upływ czasu tej klatki (nie zakładane 1/60)
+        if S.phase == "fly":
+            contracts_tick(dt, math.hypot(p.x, p.y))
         S.fire_cd = max(0.0, S.fire_cd - dt)
         od_on = S.ship["ability"] == "overdrive" and S.ab_t > 0
         S.missile_cd = max(0.0, S.missile_cd - dt * (2.0 if (od_on and lv["overdrive"] >= 4) else 1.0))
@@ -3017,6 +3468,11 @@ def main():
                 p.dx = p.dy = 0.0
                 p.anim = ship_anims[S.ship["id"]][0]
                 S.unload_q = [[k, S.cargo[k]] for k in ORE_KINDS if S.cargo[k] > 0]   # partie: [surowiec, ile zostało]
+                for k in ORE_KINDS:
+                    if S.cargo[k] > 0:
+                        if k not in save["seen"]:
+                            save["seen"].append(k)
+                        contract_progress("deliver", S.cargo[k], k)
                 S.unload_total = sum(n for _, n in S.unload_q)
                 S.cargo = {k: 0 for k in ORE_KINDS}
                 S.phase, S.t, S.idle_t = "unload", 0, 0
@@ -3341,7 +3797,8 @@ def main():
                 e.life = False
         for o in ores:
             if o.update(p, fly and alive and cargo_free() > 0,
-                        Ore.MAGNET * S.ship["magnet"] * (1 + COILS_BONUS * lv["coils"] if S.ship["id"] == "hauler" else 1)):
+                        Ore.MAGNET * S.ship["magnet"] * (1 + COILS_BONUS * lv["coils"] if S.ship["id"] == "hauler" else 1)
+                        * (1 + meta("magnet"))):
                 got = add_cargo(o.kind, o.amount)
                 if got:
                     S.pick[o.kind] += got
@@ -3748,6 +4205,8 @@ def main():
         cy = CH + BASE_ART_R - (26 if low else 58)  # tylko wierzch planety wyłania się zza dołu ekranu
         screen.blit(base_img, base_img.get_rect(center=(CW // 2, cy)))
 
+    fill_contracts()
+
     # --- dochód z bazy nagromadzony pod nieobecność gracza (do pojemności skarbca) ---
     rate0 = income_rate(save["base"]) / 60.0
     if rate0 > 0 and save["saved_at"]:
@@ -3791,6 +4250,15 @@ def main():
                         choice = menu_items[S.sel]
                         if choice == "LAUNCH":
                             do_launch()
+                        elif choice == "CONTRACTS":
+                            S.notice[2] = 0
+                            S.ct_sel = 0
+                            S.state = "contracts"
+                        elif choice == "FRONTIER":
+                            S.notice[2] = 0
+                            S.fr_sel = 0
+                            S.jump_confirm = 0.0
+                            S.state = "frontier"
                         elif choice == "UPGRADES":
                             S.notice[2] = 0
                             S.state = "upgrades"
@@ -3906,6 +4374,46 @@ def main():
                         set_notice(f"FPS CAP: {render_fps}", LIME)
                     elif key == pygame.K_ESCAPE:
                         S.state = "base"
+                elif S.state == "contracts":
+                    n_c = len(save["contracts"])
+                    if key == pygame.K_UP:
+                        S.ct_sel = (S.ct_sel - 1) % n_c
+                    elif key == pygame.K_DOWN:
+                        S.ct_sel = (S.ct_sel + 1) % n_c
+                    elif key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                        c = save["contracts"][S.ct_sel]
+                        if c["on"]:   # rezygnacja: kontrakt znika, pojawia się nowa oferta
+                            save["contracts"][S.ct_sel] = new_contract(save)
+                            set_notice("CONTRACT CANCELLED - NEW OFFER", ORANGE)
+                        else:
+                            c["on"] = True
+                            set_notice("CONTRACT ACCEPTED - TIMER RUNS IN FLIGHT", LIME)
+                        persist()
+                    elif key == pygame.K_ESCAPE:
+                        S.state = "base"
+                elif S.state == "frontier":
+                    rows_n = len(RELIC_PERKS) + 1
+                    if key in (pygame.K_LEFT, pygame.K_RIGHT):
+                        S.fr_tab = 1 - S.fr_tab
+                        S.jump_confirm = 0.0
+                    elif key == pygame.K_UP and S.fr_tab == 0:
+                        S.fr_sel = (S.fr_sel - 1) % rows_n
+                        S.jump_confirm = 0.0
+                    elif key == pygame.K_DOWN and S.fr_tab == 0:
+                        S.fr_sel = (S.fr_sel + 1) % rows_n
+                        S.jump_confirm = 0.0
+                    elif key in (pygame.K_RETURN, pygame.K_KP_ENTER) and S.fr_tab == 0:
+                        if S.fr_sel < len(RELIC_PERKS):
+                            buy_relic_perk(S.fr_sel)
+                        elif relics_for(save["earned"]) < JUMP_MIN_RELICS:
+                            set_notice(f"A JUMP MUST GIVE AT LEAST {JUMP_MIN_RELICS} RELICS", RED)
+                        elif S.jump_confirm > 0:
+                            sector_jump()
+                        else:
+                            S.jump_confirm = 240.0
+                            set_notice("PRESS ENTER AGAIN TO JUMP (RESETS THIS SECTOR!)", RED)
+                    elif key == pygame.K_ESCAPE:
+                        S.state = "base"
                 elif S.state == "upgrades":
                     if key == pygame.K_UP:
                         S.up_sel = (S.up_sel - 1) % len(UPGRADES)
@@ -3928,10 +4436,12 @@ def main():
                 info.append(f"INCOME {income_rate(save['base'])}/MIN")
             if save["drones"]:
                 info.append(f"DRONES {save['drones']}")
+            if save["sector"] > 1 or save["relics"]:
+                info.append(f"SECTOR {save['sector']}  RELICS {save['relics']}")
             if info:
                 text("   ".join(info), 8, GREY, (0, 55), center=True)
             blink = (pygame.time.get_ticks() // 400) % 2 == 0
-            item_y0, item_step = 66, 17   # więcej pozycji w menu (SPECIALS, SETTINGS) -> mniejszy odstęp, żeby zmieścić stopkę
+            item_y0, item_step = 66, 16   # więcej pozycji w menu (SPECIALS, SETTINGS) -> mniejszy odstęp, żeby zmieścić stopkę
             for i, label in enumerate(menu_items):
                 if i == S.sel:
                     label = f"> {label} <" if blink else f"  {label}  "
@@ -4039,6 +4549,120 @@ def main():
                 text(S.notice[0], 8, S.notice[1], (0, 98 + rows_n * rh + 12), center=True)
                 S.notice[2] -= DT_SCALE
             text("LEFT/RIGHT SHIP  UP/DOWN SELECT  ENTER BUY", 8, GREY, (0, CH - 14), center=True)
+
+        elif S.state == "contracts":
+            draw_base_backdrop(low=True)
+            text("CONTRACTS", 24, YELLOW, (0, 4), center=True, shadow=RED)
+            text(f"CREDITS {save['credits']}   RELICS {save['relics']}", 8, CYAN, (0, 32), center=True)
+            rh = 58
+            for i, c in enumerate(save["contracts"]):
+                y = 46 + i * (rh + 4)
+                sel = i == S.ct_sel
+                panel((16, y, CW - 32, rh))
+                if sel:
+                    pygame.draw.rect(screen, YELLOW, (16, y, CW - 32, rh), 1)
+                text(contract_title(c), 8, YELLOW if sel else WHITE, (26, y + 6), shadow=None)
+                if c["on"]:
+                    text("ACTIVE", 8, LIME, (CW - 26, y + 6), right=True, shadow=None)
+                text("REWARD " + contract_reward_text(c), 8, (210, 184, 255) if c["art"] else CYAN, (26, y + 20),
+                     shadow=None)
+                if c["on"]:
+                    exp = c["type"] == "expedition"
+                    prog = f"BEST {c['got'] // 100}/{c['n'] // 100}KM" if exp else f"PROGRESS {c['got']}/{c['n']}"
+                    text(f"{prog}   TIME LEFT {mmss(c['left'])}", 8, RED if c["left"] < 60 else WHITE, (26, y + 34),
+                         shadow=None)
+                    bw = CW - 52
+                    pygame.draw.rect(screen, DARK, (26, y + 47, bw, 4))
+                    pygame.draw.rect(screen, LIME, (26, y + 47, int(bw * min(1.0, c["got"] / max(1, c["n"]))), 4))
+                else:
+                    text(f"TIME LIMIT {mmss(c['time'])} OF FLIGHT", 8, GREY, (26, y + 34), shadow=None)
+                    if sel:
+                        text("ENTER - ACCEPT", 8, YELLOW, (CW - 26, y + 34), right=True, shadow=None)
+            if S.notice[2] > 0:
+                text(S.notice[0], 8, S.notice[1], (0, 236), center=True)
+                S.notice[2] -= DT_SCALE
+            text("TIMERS RUN ONLY WHILE YOU FLY. ORE STILL SELLS NORMALLY.", 8, GREY, (0, 252), center=True)
+            text("UP/DOWN SELECT  ENTER ACCEPT/CANCEL  ESC BACK", 8, GREY, (0, CH - 14), center=True)
+
+        elif S.state == "frontier":
+            draw_base_backdrop(low=True)
+            text("FRONTIER", 24, YELLOW, (0, 4), center=True, shadow=RED)
+            text(f"SECTOR {save['sector']}   RELICS {save['relics']}", 8, (210, 184, 255), (0, 30), center=True)
+            for j, tab in enumerate(("RELICS", "ARTIFACTS")):
+                tx_ = CW // 2 + (j * 2 - 1) * 60
+                on = j == S.fr_tab
+                text(f"[{tab}]" if on else tab, 8, YELLOW if on else GREY, (tx_, 42), mid=True)
+            if S.jump_confirm > 0:
+                S.jump_confirm -= DT_SCALE
+            if S.fr_tab == 0:
+                rows = len(RELIC_PERKS) + 1
+                rh = 25
+                panel((16, 54, CW - 32, rows * rh + 6))
+                for i in range(rows):
+                    y = 57 + i * rh
+                    sel = i == S.fr_sel
+                    if sel:
+                        pygame.draw.rect(screen, DARK, (20, y, CW - 40, rh - 2))
+                        pygame.draw.rect(screen, YELLOW, (20, y, CW - 40, rh - 2), 1)
+                    if i < len(RELIC_PERKS):
+                        pk = RELIC_PERKS[i]
+                        lvl = save["relic_lv"].get(pk["key"], 0)
+                        total = len(pk["costs"])
+                        maxed = lvl >= total
+                        text(pk["name"], 8, YELLOW if sel else WHITE, (28, y + 3), shadow=None)
+                        pips(176, y + 3, lvl, total, LIME if maxed else (210, 184, 255), NAVY if sel else DARK)
+                        if maxed:
+                            text("MAX", 8, LIME, (CW - 28, y + 3), right=True, shadow=None)
+                        else:
+                            cost = pk["costs"][lvl]
+                            text(f"{cost} RELIC{'S' if cost > 1 else ''}", 8,
+                                 (210, 184, 255) if save["relics"] >= cost else RED, (CW - 28, y + 3), right=True, shadow=None)
+                        info = pk["info"]
+                        if pk["key"] == "start":
+                            info += f" ({short_cr(HEAD_START[min(lvl + (0 if maxed else 1), total)])})"
+                        text(info, 8, GREY, (28, y + 13), shadow=None)
+                    else:
+                        gain = relics_for(save["earned"])
+                        ok = gain >= JUMP_MIN_RELICS
+                        text("SECTOR JUMP", 8, YELLOW if sel else (210, 184, 255), (28, y + 3), shadow=None)
+                        text(f"+{gain} RELICS", 8, LIME if ok else RED, (CW - 28, y + 3), right=True, shadow=None)
+                        if ok:
+                            info = "NEW WORLD. KEEPS RELICS, PERKS, ARTIFACTS"
+                        else:
+                            need = JUMP_MIN_RELICS ** 2 * RELIC_DIVISOR - save["earned"]
+                            info = f"EARN {short_cr(int(need) + 1)} MORE CR IN THIS SECTOR"
+                        text(info, 8, GREY, (28, y + 13), shadow=None)
+                ny = 57 + rows * rh + 6
+                nxt = save["sector"] + 1
+                text(f"EARNED {short_cr(int(save['earned']))}   NEXT SECTOR: ORE x"
+                     f"{1 + SECTOR_ORE_BONUS * (nxt - 1):.2f}  ROCK HP x{1 + SECTOR_HP_BONUS * (nxt - 1):.2f}",
+                     8, GREY, (0, ny), center=True)
+                if S.notice[2] > 0:
+                    text(S.notice[0], 8, S.notice[1], (0, ny + 14), center=True)
+                    S.notice[2] -= DT_SCALE
+                text("LEFT/RIGHT TAB  UP/DOWN SELECT  ENTER BUY  ESC BACK", 8, GREY, (0, CH - 14), center=True)
+            else:
+                found = set(save["artifacts"])
+                y = 56
+                for set_key, (set_name, s_stat, s_val) in ARTIFACT_SETS.items():
+                    members = [a for a in ARTIFACTS if a[2] == set_key]
+                    have = sum(1 for a in members if a[0] in found)
+                    full = have == len(members)
+                    text(f"{set_name} {have}/{len(members)}", 8, LIME if full else YELLOW, (24, y))
+                    text("SET: " + stat_text(s_stat, s_val), 8, LIME if full else GREY, (CW - 24, y), right=True)
+                    y += 12
+                    for a in members:
+                        got = a[0] in found
+                        screen.fill((210, 184, 255) if got else DARK, (32, y + 2, 5, 5))
+                        text(a[1] if got else "? ? ?", 8, WHITE if got else GREY, (44, y), shadow=None)
+                        text(stat_text(a[3], a[4]) if got else "UNKNOWN", 8, CYAN if got else DARK, (CW - 32, y),
+                             right=True, shadow=None)
+                        y += 11
+                    y += 5
+                text(f"FOUND {len(found)}/{len(ARTIFACTS)}   DROPS: COLOSSI AND CONTRACTS", 8, (210, 184, 255), (0, y + 2),
+                     center=True)
+                text("ARTIFACTS ARE PERMANENT - THEY SURVIVE SECTOR JUMPS", 8, GREY, (0, y + 14), center=True)
+                text("LEFT/RIGHT TAB  ESC BACK", 8, GREY, (0, CH - 14), center=True)
 
         elif S.state == "upgrades":
             draw_base_backdrop(low=True)
@@ -4197,7 +4821,8 @@ def main():
                     base_lv = sum(info["base"].values())
                     upg = sum(info["levels"].values())
                     text(f"BASE LV {base_lv}   DRONES {info['drones']}   UPGRADES {upg}", 8, GREY, (38, y + 32), shadow=None)
-                    text(f"SHIPS {len(info['owned'])}/{len(SHIPS)}   WORLD {info['seed'] % 10000:04d}", 8, GREY, (38, y + 44), shadow=None)
+                    text(f"SHIPS {len(info['owned'])}/{len(SHIPS)}   WORLD {info['seed'] % 10000:04d}   SECTOR {info['sector']}",
+                         8, GREY, (38, y + 44), shadow=None)
             if S.confirm[1] > 0:
                 S.confirm = (S.confirm[0], S.confirm[1] - DT_SCALE)
             if S.notice[2] > 0:
