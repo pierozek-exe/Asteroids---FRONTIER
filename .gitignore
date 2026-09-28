@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+
+# Local saves and settings (each player starts fresh)
+frontier.json
+frontier_*.json
+progress.json
+scores.txt
+
+# Local backups
+*.backup.py
