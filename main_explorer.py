@@ -40,6 +40,10 @@ zarobione kredyty, rudy droższe i skały twardsze w każdym kolejnym sektorze);
 (wypadają z kolosów i kontraktów, dają trwałe bonusy, komplet zestawu daje dodatkowy bonus).
 Menu bazy -> SETTINGS: limit FPS (60/90/120/144/240). Symulacja gry zawsze działa w tym samym tempie
 niezależnie od wybranego FPS-a - wyższy limit daje tylko płynniejszy obraz, nie przyspiesza gry.
+
+Kod jest podzielony na moduły: config.py (stałe), view.py (widok/kamera), balance.py (statki, ulepszenia,
+koszty), progression.py (sektory, relikty, artefakty, kontrakty), saves.py (zapisy), world.py (świat
+i planety), entities.py (obiekty), effects.py (efekty), a ten plik to okno i pętla gry.
 """
 import json
 import math
@@ -60,230 +64,15 @@ os.environ.setdefault("SDL_VIDEO_CENTERED", "1")
 
 import pygame
 
-# --------------------
-# Stałe
-# --------------------
-W, H = 1200, 800           # bazowy rozmiar widoku w jednostkach logiki (dla ZOOM = 1)
-CW, CH = 480, 320          # warstwa HUD/menu; szerokość CW jest dopasowywana do proporcji okna (set_view)
-K = 0.4                    # logika -> piksele płótna
-ZOOM = 3                   # oddalenie kamery: widać ZOOM razy więcej świata w poziomie i pionie (obsługiwane 1-3; 2 = łagodniej)
-VW, VH = CW * ZOOM, CH * ZOOM   # rozmiar płótna ze światem
-KEY = (255, 0, 255)        # kolor przezroczysty warstwy HUD
-ICE_C = (115, 239, 247)    # lodowy błękit (efekty)
-
-
-def set_view(aspect):
-    """Dopasowuje szerokość widoku do proporcji okna, żeby nie było czarnych pasów po bokach."""
-    global CW, VW, VH
-    CW = max(426, min(768, int(round(CH * aspect / 2.0)) * 2))
-    VW, VH = CW * ZOOM, CH * ZOOM
-FPS = 60                   # bazowa "jednostka" czasu gry: wszystkie tabele (sekundy->klatki) liczą względem 60/s.
-RENDER_FPS_OPTIONS = (60, 90, 120, 144, 240)   # wybieralny limit odświeżania (ekran SETTINGS)
-DT_SCALE = 1.0              # aktualny_dt * FPS; przy 60 FPS = 1.0 (dokładnie jak dawniej), przy 120 = 0.5 itd.
-DT_SCALE_CAP = 3.0           # ochrona przed skokiem po zacięciu (np. przeciąganie okna)
-DEGTORAD = 0.017453
-MIN_FIRE_RATE = 0.05
-FIRE_STEP = 0.05
-ROT_STEP = 5
-BULLET_SPEED = 13.0        # prędkość pocisków (px logiki / klatkę); było 6
-BULLET_LIFE = 110          # klatek życia pocisku (zasięg = prędkość * życie)
-MISSILE_SPEED = 14.0       # maksymalna prędkość rakiet
-SHIP_SPEED_MULT = 1.0      # mnożnik prędkości wszystkich statków (2.0 = dwa razy szybsze)
-
-# świat
-WORLD_SEED = 20240921
-BASE_R = 1320              # promień planety-bazy (logika)
-BASE_ART_R = int(BASE_R * 0.4)   # ten sam promień w pikselach płótna
-PAD_R = BASE_R - 60        # odległość lądowisk od środka planety
-N_PADS = 16
-PAD_OFFSET = math.pi / N_PADS
-DOCK_R = BASE_R + 500      # w tej odległości od środka bazy zaczyna się automatyczne lądowanie
-LAUNCH_DIST = DOCK_R - PAD_R + 60   # o ile statek odlatuje od lądowiska w animacji startu
-SAFE_R = 5200              # strefa bez asteroid
-PLANET_MIN_D = 6400        # najbliższa planeta z surowcami
-TIER_STEP = 5000           # co tyle dalej od bazy asteroidy robią się twardsze
-CHUNK = 6500               # rozmiar "kafelka" świata: w każdym jest najwyżej jedna planeta (rzadkie)
-RES_R = 220                # promień planet z surowcami (jak dawna planeta-baza)
-HP_MAX = 25
-BEAM_RANGE = 420
-DASH_FRAMES = 8
-DASH_SPEED = 30
-DASH_COOLDOWN = 3.5
-PHASE_FRAMES = 22
-LAND_FRAMES = 100
-LAUNCH_FRAMES = 70
-MAP_RANGE = 12000          # zasięg minimapy (logika)
-SCAN_MULT = 2.0            # o ile Deep Scan Surveyora powiększa zasięg minimapy
-MM_S = 70                  # średnica minimapy (px płótna)
-CARGO_CAP = (30, 45, 65, 90, 125, 170, 250, 400, 650, 1000, 1600, 2500,          # poziomy 0-11
-             3600, 5000, 7000, 10000, 14000, 19000, 26000, 35000, 48000, 65000, 90000)   # poziomy 12-22
-
-BASE_DIR = Path(__file__).resolve().parent
-ASSETS = BASE_DIR / "assets"
-PIXEL = BASE_DIR / "assets_pixel"
-SAVE_FILE = BASE_DIR / "frontier.json"
-
-# Paleta Sweetie 16 (GrafxKid)
-NAVY = (26, 28, 44)
-PLUM = (93, 39, 93)
-RED = (177, 62, 83)
-ORANGE = (239, 125, 87)
-YELLOW = (255, 205, 117)
-LIME = (167, 240, 112)
-CYAN = (115, 239, 247)
-WHITE = (244, 244, 244)
-GREY = (148, 176, 194)
-DARK = (51, 60, 87)
-BLUE_D = (59, 93, 201)
-
-# surowce: kolor, cena w kredytach za sztukę
-ORE = {
-    "iron": dict(name="IRON", color=ORANGE, value=2),
-    "crystal": dict(name="CRYSTAL", color=CYAN, value=6),
-    "gold": dict(name="GOLD", color=YELLOW, value=15),
-    "titanium": dict(name="TITANIUM", color=(200, 215, 235), value=4),
-    "emerald": dict(name="EMERALD", color=(56, 183, 100), value=30),
-    "plasma": dict(name="PLASMA", color=(220, 90, 200), value=60),
-    "voidium": dict(name="VOIDIUM", color=(150, 100, 255), value=150),
-}
-ORE_KINDS = ("iron", "crystal", "gold", "titanium", "emerald", "plasma", "voidium")   # kolejność = wiersze arkusza planet
-
-
-# --------------------
-# Kamera i drobne narzędzia
-# --------------------
-CAM = [0.0, 0.0]
-
-
-def sp(x, y):
-    """Współrzędne świata -> piksele płótna (kamera wyśrodkowana na CAM)."""
-    return round((x - CAM[0]) * K) + VW // 2, round((y - CAM[1]) * K) + VH // 2
-
-
-def on_screen(x, y, margin=350):
-    return abs(x - CAM[0]) < VW / K / 2 + margin and abs(y - CAM[1]) < VH / K / 2 + margin
-
-
-def angle_diff(a, b):
-    """Najkrótsza różnica kątów (stopnie) z a do b."""
-    return (b - a + 180) % 360 - 180
-
-
-def smoothstep(u):
-    u = max(0.0, min(1.0, u))
-    return u * u * (3 - 2 * u)
-
-
-# --------------------
-# Zapis postępu (kredyty, ulepszenia, statki)
-# --------------------
-SLOTS = 3
-
-
-def slot_path(n):
-    """Slot 1 to dawny frontier.json (stare zapisy działają dalej), pozostałe: frontier_2.json, frontier_3.json."""
-    return SAVE_FILE if n == 1 else SAVE_FILE.with_name(f"frontier_{n}.json")
-
-
-def settings_path():
-    return SAVE_FILE.with_name("frontier_settings.json")
-
-
-def read_settings():
-    try:
-        return json.loads(settings_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError, AttributeError):
-        return {}
-
-
-def write_settings(patch):
-    """Uaktualnia plik ustawień w miejscu (slot aktywny + limit FPS), nie nadpisując drugiego pola."""
-    data = read_settings()
-    data.update(patch)
-    try:
-        settings_path().write_text(json.dumps(data), encoding="utf-8")
-    except OSError:
-        pass
-
-
-def read_active_slot():
-    try:
-        n = int(read_settings().get("slot", 1))
-    except (ValueError, TypeError):
-        n = 1
-    return n if 1 <= n <= SLOTS else 1
-
-
-def write_active_slot(n):
-    write_settings({"slot": n})
-
-
-def read_render_fps():
-    try:
-        n = int(read_settings().get("fps", 60))
-    except (ValueError, TypeError):
-        n = 60
-    return n if n in RENDER_FPS_OPTIONS else 60
-
-
-def write_render_fps(n):
-    write_settings({"fps": n})
-
-
-def default_save():
-    return {"seed": WORLD_SEED, "credits": 0, "levels": {}, "owned": ["scout"], "ship": "scout",
-            "base": {m["key"]: 0 for m in BASE_MODULES}, "project": None, "vault": 0.0,
-            "drones": 0, "drone_tech": 0, "saved_at": 0.0,
-            # endgame (sektor, relikty i artefakty zostają po skoku do nowego sektora)
-            "sector": 1, "relics": 0, "relic_lv": {}, "artifacts": [], "earned": 0.0, "far": 0.0,
-            "seen": ["iron"], "contracts": []}
-
-
-def load_save(path, upgrade_keys, ship_ids):
-    data = default_save()
-    data["levels"] = {k: 0 for k in upgrade_keys}
-    data["base"] = {m["key"]: 0 for m in BASE_MODULES}
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        data["seed"] = int(raw.get("seed", WORLD_SEED))
-        data["credits"] = max(0, int(raw.get("credits", 0)))
-        for k, costs in upgrade_keys.items():
-            data["levels"][k] = max(0, min(len(costs), int(raw.get("levels", {}).get(k, 0))))
-        data["owned"] = sorted({o for o in raw.get("owned", []) if o in ship_ids} | {"scout"})
-        data["ship"] = raw.get("ship") if raw.get("ship") in data["owned"] else "scout"
-        for m in BASE_MODULES:  # poziomy modułów bazy
-            data["base"][m["key"]] = max(0, min(len(m["costs"]), int(raw.get("base", {}).get(m["key"], 0))))
-        data["vault"] = max(0.0, float(raw.get("vault", 0.0)))
-        data["drones"] = max(0, min(len(DRONE_COSTS), int(raw.get("drones", 0))))
-        data["drone_tech"] = max(0, min(len(DRONE_TECH_COSTS), int(raw.get("drone_tech", 0))))
-        data["saved_at"] = float(raw.get("saved_at", 0.0))
-        data["sector"] = max(1, int(raw.get("sector", 1)))
-        data["relics"] = max(0, int(raw.get("relics", 0)))
-        data["relic_lv"] = {p["key"]: max(0, min(len(p["costs"]), int(raw.get("relic_lv", {}).get(p["key"], 0))))
-                            for p in RELIC_PERKS}
-        ids = {a[0] for a in ARTIFACTS}
-        data["artifacts"] = [a for a in dict.fromkeys(raw.get("artifacts", [])) if a in ids]
-        data["earned"] = max(0.0, float(raw.get("earned", 0.0)))
-        data["far"] = max(0.0, float(raw.get("far", 0.0)))
-        data["seen"] = [k for k in ORE_KINDS if k in raw.get("seen", []) or k == "iron"]
-        data["contracts"] = [c for c in raw.get("contracts", []) if isinstance(c, dict) and c.get("type") in CONTRACT_TIME]
-        pr = raw.get("project")
-        if isinstance(pr, dict) and pr.get("key") in {m["key"] for m in BASE_MODULES}:
-            m = module_by_key(pr["key"])
-            if data["base"][m["key"]] < len(m["costs"]):
-                data["project"] = {"key": pr["key"], "paid": max(0, int(pr.get("paid", 0))),
-                                   "progress": {k: max(0, int(pr.get("progress", {}).get(k, 0))) for k in ORE_KINDS}}
-    except (OSError, ValueError, TypeError, AttributeError):
-        pass
-    return data
-
-
-def write_save(path, data):
-    data["saved_at"] = time.time()
-    try:
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    except OSError:
-        print("Nie można zapisać postępu:", path)
+import view
+from balance import *
+from config import *
+from effects import *
+from entities import *
+from progression import *
+from saves import *
+from view import CAM, angle_diff, on_screen, set_view, smoothstep, sp
+from world import *
 
 
 # --------------------
@@ -330,1456 +119,10 @@ def present(canvas):
 
 
 # --------------------
-# Animacje, obroty, sylwetki
-# --------------------
-class Animation:
-    def __init__(self, frames, speed):
-        self.frame = 0.0
-        self.speed = speed
-        self.frames = frames
-
-    def copy(self):
-        return Animation(self.frames, self.speed)
-
-    def update(self):
-        self.frame += self.speed * DT_SCALE   # tempo animacji niezależne od limitu FPS
-        n = len(self.frames)
-        if self.frame >= n:
-            self.frame %= n
-
-    def is_end(self):
-        return self.frame + self.speed * DT_SCALE >= len(self.frames)
-
-    @property
-    def image(self):
-        return self.frames[int(self.frame)]
-
-
-_rot_cache = {}
-
-
-def rotated(img, deg):
-    step = int(round(deg / ROT_STEP)) % (360 // ROT_STEP)
-    if step == 0:
-        return img
-    key = (id(img), step)
-    r = _rot_cache.get(key)
-    if r is None:
-        r = _rot_cache[key] = pygame.transform.rotate(img, -step * ROT_STEP)
-    return r
-
-
-_sil_cache = {}
-
-
-def silhouette(img, color):
-    key = (id(img), color)
-    s = _sil_cache.get(key)
-    if s is None:
-        s = pygame.mask.from_surface(img).to_surface(setcolor=tuple(color) + (255,), unsetcolor=(0, 0, 0, 0))
-        _sil_cache[key] = s
-    return s
-
-
-# --------------------
-# Encje
-# --------------------
-class Entity:
-    def __init__(self, name="entity"):
-        self.x = self.y = self.dx = self.dy = 0.0
-        self.R = 1
-        self.angle = 0.0
-        self.life = True
-        self.name = name
-        self.anim = None
-        self.scale = 1.0
-
-    def settings(self, anim, x, y, angle=0.0, radius=1):
-        self.anim = anim.copy()
-        self.x, self.y = x, y
-        self.angle = angle
-        self.R = radius
-
-    def update(self):
-        pass
-
-    def draw(self, canvas):
-        img = rotated(self.anim.image, self.angle + 90)
-        if self.scale != 1.0:  # animacja lądowania/startu: statek "oddala się" od kamery
-            img = pygame.transform.scale(img, (max(1, round(img.get_width() * self.scale)),
-                                               max(1, round(img.get_height() * self.scale))))
-        canvas.blit(img, img.get_rect(center=sp(self.x, self.y)))
-
-
-class Player(Entity):
-    def __init__(self):
-        super().__init__("player")
-        self.thrust = False
-        self.speed = 4.0
-        self.turn = 3.0
-        self.max_speed = 15
-        self.dash_t = 0
-        self.dash_angle = 0.0
-        self.dash_speed = DASH_SPEED
-        self.boost = 1.0         # mnożnik silnika (Overdrive Strikera)
-        self.reverse = False     # klawisz S: małe dopalacze hamujące / cofające
-
-    def update(self):
-        if self.dash_t > 0:
-            self.dash_t -= DT_SCALE
-            if self.dash_t <= 0:
-                self.dash_t = 0
-            rad = self.dash_angle * DEGTORAD
-            self.dx = math.cos(rad) * self.dash_speed
-            self.dy = math.sin(rad) * self.dash_speed
-            if self.dash_t == 0:
-                k = self.max_speed / self.dash_speed
-                self.dx *= k
-                self.dy *= k
-        else:
-            if self.thrust:
-                self.dx += math.cos(self.angle * DEGTORAD) * self.speed * self.boost * 0.05 * DT_SCALE
-                self.dy += math.sin(self.angle * DEGTORAD) * self.speed * self.boost * 0.05 * DT_SCALE
-            elif self.reverse:  # dopalacze wsteczne: słabsze niż silnik główny
-                self.dx -= math.cos(self.angle * DEGTORAD) * self.speed * self.boost * 0.05 * 0.6 * DT_SCALE
-                self.dy -= math.sin(self.angle * DEGTORAD) * self.speed * self.boost * 0.05 * 0.6 * DT_SCALE
-                self.dx *= 0.985 ** DT_SCALE
-                self.dy *= 0.985 ** DT_SCALE
-            else:
-                self.dx *= 0.99 ** DT_SCALE
-                self.dy *= 0.99 ** DT_SCALE
-            v = math.hypot(self.dx, self.dy)
-            cap = self.max_speed * self.boost
-            if v > cap:
-                self.dx *= cap / v
-                self.dy *= cap / v
-        self.x += self.dx * DT_SCALE
-        self.y += self.dy * DT_SCALE
-
-
-class Asteroid(Entity):
-    def __init__(self):
-        super().__init__("asteroid")
-        self.dx = random.randint(-4, 3)
-        self.dy = random.randint(-4, 3)
-        self.hp = self.max_hp = 1
-        self.tier = "large"      # "small", "large" albo "colossus"
-        self.ore = "iron"        # jaki surowiec zostawia (iron, titanium albo gold)
-        self.field = None        # planeta, wokół której asteroida krąży w skupisku
-        self.base = 1            # poziom HP w miejscu spawnu (dziedziczą go odłamki)
-        self.gold = False
-        self.flash = 0
-        self.beam = False
-        self.pull_t = 0
-        self.crush_cd = 0        # przerwa między zgnieceniami przez Gravity Well
-        self.knock = 0           # klatki po odrzucie: skupisko nie hamuje asteroidy
-        self.phase = random.randrange(70)
-
-    def update(self):
-        self.x += self.dx * DT_SCALE
-        self.y += self.dy * DT_SCALE
-        if self.flash > 0:
-            self.flash -= DT_SCALE
-        if self.crush_cd > 0:
-            self.crush_cd -= DT_SCALE
-        if self.knock > 0:
-            self.knock -= DT_SCALE
-
-    def draw(self, canvas):
-        img = rotated(self.anim.image, self.angle + 90)
-        if self.flash > 0:
-            img = silhouette(img, WHITE)
-        elif self.gold and (pygame.time.get_ticks() // 33 + self.phase) % 70 < 3:
-            img = silhouette(img, (255, 244, 200))
-        cx, cy = sp(self.x, self.y)
-        canvas.blit(img, img.get_rect(center=(cx, cy)))
-        if self.hp < self.max_hp:
-            w = max(6, int(self.R * 2 * K))
-            x0, y0 = cx - w // 2, cy - int(self.R * K) - 5
-            frac = self.hp / self.max_hp
-            canvas.fill(NAVY, (x0 - 1, y0 - 1, w + 2, 4))
-            canvas.fill(LIME if frac > 0.5 else (ORANGE if frac > 0.25 else RED),
-                        (x0, y0, max(1, int(w * frac)), 2))
-
-
-class Bullet(Entity):
-    def __init__(self):
-        super().__init__("bullet")
-        self.dmg = 1
-        self.age = 0
-        self.maxage = BULLET_LIFE   # Long Optics wydłuża zasięg
-        self.spark = False          # bomblety kasetowe zostawiają iskry
-        self.ivx = self.ivy = 0.0   # prędkość statku w chwili strzału (żeby pocisk jej nie tracił)
-
-    def update(self):
-        self.age += DT_SCALE
-        self.dx = math.cos(self.angle * DEGTORAD) * BULLET_SPEED + self.ivx
-        self.dy = math.sin(self.angle * DEGTORAD) * BULLET_SPEED + self.ivy
-        self.x += self.dx * DT_SCALE
-        self.y += self.dy * DT_SCALE
-        if self.age > self.maxage:
-            self.life = False
-
-
-class Missile(Entity):
-    TURN = 7.5
-
-    def __init__(self, world, target):
-        super().__init__("missile")
-        self.world = world
-        self.target = target
-        self.age = 0
-        self.spd = 3.0
-        self.dmg = 4             # obrażenia bezpośrednie
-        self.cluster = False     # najwyższy poziom: po trafieniu rozpada się na bomblety
-
-    def update(self):
-        self.age += DT_SCALE
-        t = self.target
-        if t is None or not t.life:
-            t = self.target = nearest_asteroid(self.world, self.x, self.y)
-        if t is not None and self.age > 6:
-            want = math.degrees(math.atan2(t.y - self.y, t.x - self.x))
-            diff = (want - self.angle + 180) % 360 - 180
-            turn = self.TURN * DT_SCALE
-            self.angle += max(-turn, min(turn, diff))
-        self.spd = min(MISSILE_SPEED, self.spd + 0.35 * DT_SCALE)
-        self.dx = math.cos(self.angle * DEGTORAD) * self.spd
-        self.dy = math.sin(self.angle * DEGTORAD) * self.spd
-        self.x += self.dx * DT_SCALE
-        self.y += self.dy * DT_SCALE
-        if self.age > 240:
-            self.life = False
-
-
-class Shockwave:
-    GROW = 26
-    FADE = 8
-
-    def __init__(self, owner, max_r, damage=8, colors=(CYAN, WHITE), style="plain"):
-        self.owner = owner
-        self.max_r = max_r
-        self.damage = damage
-        self.colors = colors
-        self.style = style           # "plain", "electric" (błyskawice) albo "fire" (iskry)
-        self.t = 0
-        self.hit = set()
-        self.bolts = []              # błyskawice do trafionych asteroid: [x, y, pozostałe klatki]
-        self.life = True
-
-    @property
-    def x(self):
-        return self.owner.x
-
-    @property
-    def y(self):
-        return self.owner.y
-
-    @property
-    def r(self):
-        return self.max_r * min(1.0, self.t / self.GROW) ** 0.7
-
-    @property
-    def active(self):
-        return self.t <= self.GROW
-
-    def update(self):
-        self.t += DT_SCALE
-        for b in self.bolts:
-            b[2] -= DT_SCALE
-        self.bolts = [b for b in self.bolts if b[2] > 0]
-        if self.t > self.GROW + self.FADE and not self.bolts:
-            self.life = False
-
-    def add_bolt(self, x, y):
-        if len(self.bolts) < 14:
-            self.bolts.append([x, y, 9])
-
-    def draw(self, canvas):
-        r = int(self.r * K)
-        cx, cy = sp(self.x, self.y)
-        c0, c1 = self.colors
-        for bx_, by_, ttl in self.bolts:   # łańcuch błyskawic do trafionych skał
-            tx, ty = sp(bx_, by_)
-            pts = bolt_points(cx, cy, tx, ty, 10 + ttl, 7)
-            pygame.draw.lines(canvas, c0, False, pts, 3 if ttl > 5 else 2)
-            pygame.draw.lines(canvas, WHITE, False, pts, 1)
-            draw_glow(canvas, tx, ty, 22, c0, 0.5 * ttl / 9)
-        if r < 2 or self.t > self.GROW + self.FADE or (not self.active and (self.t // 2) % 2):
-            return
-        if self.active and self.damage > 0:   # świecące czoło fali
-            draw_glow(canvas, cx, cy, r * 1.1, c0, 0.45 * (1 - self.t / self.GROW))
-        if self.style == "electric":  # postrzępiony, trzeszczący pierścień z błyskawicami do środka
-            jit = 3 if self.active else 1
-            outer, inner = [], []
-            for deg in range(0, 361, 9):
-                a = math.radians(deg)
-                ro, ri = r + random.randint(-jit, jit), r - 3 + random.randint(-jit, jit)
-                outer.append((cx + math.cos(a) * ro, cy + math.sin(a) * ro))
-                inner.append((cx + math.cos(a) * ri, cy + math.sin(a) * ri))
-            pygame.draw.lines(canvas, c0, False, outer, 2)
-            pygame.draw.lines(canvas, c1, False, inner, 1)
-            if self.active:
-                for _ in range(7):
-                    a = random.random() * math.tau
-                    ln = random.randint(6, 16)
-                    p1 = (cx + math.cos(a) * r, cy + math.sin(a) * r)
-                    p2 = (cx + math.cos(a) * (r - ln) + random.randint(-3, 3), cy + math.sin(a) * (r - ln) + random.randint(-3, 3))
-                    pygame.draw.line(canvas, WHITE, p1, p2, 1)
-        else:
-            pygame.draw.circle(canvas, c0, (cx, cy), r, 2)
-            if r > 5:
-                pygame.draw.circle(canvas, c1, (cx, cy), r - 3, 1)
-            if r > 9 and self.active:
-                pygame.draw.circle(canvas, DARK, (cx, cy), r - 6, 1)
-        if self.active:  # iskry na obwodzie
-            for _ in range(10 if self.style == "fire" else 6):
-                a = random.random() * math.tau
-                rr = r + random.randint(-2, 4)
-                canvas.fill(random.choice((c1, WHITE, YELLOW) if self.style == "fire" else (c1, WHITE)),
-                            (cx + math.cos(a) * rr, cy + math.sin(a) * rr, 2, 2))
-
-
-class FxRing:
-    """Pierścień efektu w stałym punkcie świata: rozszerza się albo zapada; kształt: koło lub sześciokąt."""
-
-    def __init__(self, x, y, r0, r1, life, colors, width=2, shape="circle", delay=0, spin=0.0):
-        self.x, self.y, self.r0, self.r1 = x, y, r0, r1
-        self.max = self.life = life
-        self.colors, self.width, self.shape, self.delay, self.spin = colors, width, shape, delay, spin
-        self.t = 0
-
-    def update(self):
-        if self.delay > 0:
-            self.delay -= DT_SCALE
-            return
-        self.t += DT_SCALE
-        self.life -= DT_SCALE
-
-    def draw(self, canvas):
-        if self.delay > 0 or self.life <= 0:
-            return
-        u = self.t / self.max
-        e = u if self.r1 < self.r0 else 1 - (1 - u) ** 2   # rozszerzanie: szybki start, zapadanie: przyspieszenie
-        r = (self.r0 + (self.r1 - self.r0) * e) * K
-        if r < 2 or (self.life < self.max * 0.25 and (self.t // 2) % 2):
-            return
-        cx, cy = sp(self.x, self.y)
-        c0, c1 = self.colors
-        if self.shape == "hex":
-            def hexpts(rad):
-                return [(cx + math.cos(self.spin * u * math.tau + k * math.pi / 3) * rad,
-                         cy + math.sin(self.spin * u * math.tau + k * math.pi / 3) * rad) for k in range(6)]
-            pygame.draw.polygon(canvas, c0, hexpts(r), self.width)
-            pygame.draw.polygon(canvas, c1, hexpts(r * 0.8), 1)
-            for px_, py_ in hexpts(r):
-                canvas.fill(WHITE, (round(px_) - 1, round(py_) - 1, 2, 2))
-        else:
-            pygame.draw.circle(canvas, c0, (cx, cy), int(r), self.width)
-            if r > 6:
-                pygame.draw.circle(canvas, c1, (cx, cy), int(r) - self.width - 1, 1)
-
-
-class Particle:
-    __slots__ = ("x", "y", "dx", "dy", "life", "max", "colors")
-
-    def __init__(self, x, y, dx, dy, life, colors):
-        self.x, self.y, self.dx, self.dy = x, y, dx, dy
-        self.life = self.max = life
-        self.colors = colors
-
-    def update(self):
-        self.x += self.dx * DT_SCALE
-        self.y += self.dy * DT_SCALE
-        self.dx *= 0.95 ** DT_SCALE
-        self.dy *= 0.95 ** DT_SCALE
-        self.life -= DT_SCALE
-
-    def draw(self, canvas):
-        frac = 1 - self.life / self.max
-        c = self.colors[min(len(self.colors) - 1, int(frac * len(self.colors)))]
-        s = 2 if frac < 0.4 else 1
-        x, y = sp(self.x, self.y)
-        canvas.fill(c, (x, y, s, s))
-
-
-class Sparkle:
-    def __init__(self, x, y):
-        self.x, self.y = x, y
-        self.life = self.max = 12
-
-    def update(self):
-        self.life -= DT_SCALE
-
-    def draw(self, canvas):
-        frac = self.life / self.max
-        arm = 1 + int(2 * (1 - abs(2 * frac - 1)))
-        cx, cy = sp(self.x, self.y)
-        canvas.fill(WHITE, (cx, cy, 1, 1))
-        for d in range(1, arm + 1):
-            c = WHITE if d == 1 else YELLOW
-            for ox, oy in ((d, 0), (-d, 0), (0, d), (0, -d)):
-                canvas.fill(c, (cx + ox, cy + oy, 1, 1))
-
-
-class Ghost:
-    def __init__(self, x, y, img):
-        self.x, self.y, self.img = x, y, img
-        self.life = 10
-
-    def update(self):
-        self.life -= DT_SCALE
-
-    def draw(self, canvas):
-        col = WHITE if self.life > 8 else (CYAN if self.life > 5 else (BLUE_D if self.life > 2 else NAVY))
-        s_ = silhouette(self.img, col)
-        canvas.blit(s_, s_.get_rect(center=sp(self.x, self.y)))
-
-
-# --------------------
-# Efekty specjalne: poświata (addytywna), smugi iskier, odłamki, efekty z opóźnieniem
-# --------------------
-_glow_base = {}
-_glow_cache = {}
-
-
-def glow_sprite(radius, color, lvl):
-    """Okrągła poświata (czarne tło, jasny środek) do mieszania addytywnego; promień i jasność są kwantyzowane.
-    Każdy kolor rysowany jest raz (64 px), kolejne rozmiary to tylko szybkie skalowanie + przyciemnienie."""
-    step = max(2, int(radius) // 5)
-    R = max(2, int(radius) // step * step)
-    key = (R, color, lvl)
-    s = _glow_cache.get(key)
-    if s is None:
-        base = _glow_base.get(color)
-        if base is None:
-            base = pygame.Surface((129, 129)).convert()
-            base.fill((0, 0, 0))
-            for r in range(64, 0, -1):
-                f = (1 - r / 64) ** 1.7
-                pygame.draw.circle(base, (int(color[0] * f), int(color[1] * f), int(color[2] * f)), (64, 64), r)
-            _glow_base[color] = base
-        s = pygame.transform.smoothscale(base, (2 * R + 1, 2 * R + 1))
-        if lvl < 6:
-            v = int(255 * lvl / 6)
-            s.fill((v, v, v), special_flags=pygame.BLEND_RGB_MULT)
-        if len(_glow_cache) > 1200:   # najstarsze wpisy wypadają pierwsze
-            for k_ in list(_glow_cache)[:300]:
-                del _glow_cache[k_]
-        _glow_cache[key] = s
-    return s
-
-
-def draw_glow(canvas, cx, cy, radius, color, power=1.0):
-    """Poświata w pikselach płótna: rozjaśnia to, co pod nią (BLEND_RGB_ADD), więc działa jak światło."""
-    if power <= 0.04 or radius < 2:
-        return
-    s = glow_sprite(radius, color, min(6, max(1, round(power * 6))))
-    R = s.get_width() // 2
-    canvas.blit(s, (round(cx) - R, round(cy) - R), special_flags=pygame.BLEND_RGB_ADD)
-
-
-def emit_count(n):
-    """Ile cząstek wypuścić w tej klatce, żeby średnio było n na klatkę przy 60 FPS (niezależnie od limitu FPS)."""
-    x = n * DT_SCALE
-    k = int(x)
-    return k + (1 if random.random() < x - k else 0)
-
-
-class Glow:
-    """Rozbłysk światła w punkcie świata (albo przyczepiony do obiektu): rośnie i gaśnie."""
-
-    def __init__(self, x, y, r0, r1, life, color, power=1.0, delay=0, owner=None):
-        self.x, self.y, self.r0, self.r1 = x, y, r0, r1
-        self.max = self.life = life
-        self.color, self.power, self.delay, self.owner = color, power, delay, owner
-        self.t = 0
-
-    def update(self):
-        if self.delay > 0:
-            self.delay -= DT_SCALE
-            return
-        self.t += DT_SCALE
-        self.life -= DT_SCALE
-
-    def draw(self, canvas):
-        if self.delay > 0 or self.life <= 0:
-            return
-        u = min(1.0, self.t / self.max)
-        r = (self.r0 + (self.r1 - self.r0) * (1 - (1 - u) ** 3)) * K
-        x, y = (self.owner.x, self.owner.y) if self.owner is not None else (self.x, self.y)
-        cx, cy = sp(x, y)
-        draw_glow(canvas, cx, cy, r, self.color, self.power * (1 - u) ** 1.4)
-
-
-class Streak:
-    """Iskra-smuga: rysowana jako kreska wzdłuż prędkości, więc wybuchy wyglądają na szybkie i ostre."""
-    __slots__ = ("x", "y", "dx", "dy", "life", "max", "colors", "drag")
-
-    def __init__(self, x, y, dx, dy, life, colors, drag=0.9):
-        self.x, self.y, self.dx, self.dy = x, y, dx, dy
-        self.life = self.max = life
-        self.colors, self.drag = colors, drag
-
-    def update(self):
-        self.x += self.dx * DT_SCALE
-        self.y += self.dy * DT_SCALE
-        k = self.drag ** DT_SCALE
-        self.dx *= k
-        self.dy *= k
-        self.life -= DT_SCALE
-
-    def draw(self, canvas):
-        frac = 1 - self.life / self.max
-        c = self.colors[min(len(self.colors) - 1, int(frac * len(self.colors)))]
-        x, y = sp(self.x, self.y)
-        ln = 1.6 * K
-        x2, y2 = x - self.dx * ln, y - self.dy * ln
-        if abs(x2 - x) + abs(y2 - y) < 1.5:
-            canvas.fill(c, (x, y, 1, 1))
-        else:
-            pygame.draw.line(canvas, c, (x, y), (round(x2), round(y2)), 2 if frac < 0.3 else 1)
-
-
-class Debris:
-    """Odłamek skały/kadłuba: wiruje, zwalnia i zostawia żarzący się ślad."""
-    __slots__ = ("x", "y", "dx", "dy", "life", "max", "color", "size", "hot")
-
-    def __init__(self, x, y, dx, dy, life, color, size=2, hot=True):
-        self.x, self.y, self.dx, self.dy = x, y, dx, dy
-        self.life = self.max = life
-        self.color, self.size, self.hot = color, size, hot
-
-    def update(self):
-        self.x += self.dx * DT_SCALE
-        self.y += self.dy * DT_SCALE
-        k = 0.965 ** DT_SCALE
-        self.dx *= k
-        self.dy *= k
-        self.life -= DT_SCALE
-
-    def draw(self, canvas):
-        x, y = sp(self.x, self.y)
-        frac = self.life / self.max
-        if self.hot and frac > 0.35:   # rozżarzony ślad za odłamkiem
-            canvas.fill(ORANGE if frac > 0.7 else RED, (round(x - self.dx * K * 2), round(y - self.dy * K * 2), 1, 1))
-        s = self.size if frac > 0.3 else 1
-        canvas.fill(NAVY, (x - s // 2 + 1, y - s // 2 + 1, s, s))
-        canvas.fill(self.color if frac > 0.2 else DARK, (x - s // 2, y - s // 2, s, s))
-
-
-class Timer:
-    """Efekt z opóźnieniem (np. seria wybuchów kolosa): po 'delay' klatkach woła fn() i znika."""
-
-    def __init__(self, delay, fn):
-        self.delay, self.fn, self.life = delay, fn, 1
-
-    def update(self):
-        self.delay -= DT_SCALE
-        if self.delay <= 0 and self.life > 0:
-            self.life = 0
-            self.fn()
-
-    def draw(self, canvas):
-        pass
-
-
-def bolt_points(x1, y1, x2, y2, jit, n=6):
-    """Postrzępiona błyskawica między dwoma punktami płótna."""
-    pts = [(x1, y1)]
-    dx, dy = x2 - x1, y2 - y1
-    d = math.hypot(dx, dy) or 1.0
-    qx, qy = -dy / d, dx / d
-    for i in range(1, n):
-        f = i / n
-        o = random.uniform(-jit, jit) * (1 - abs(2 * f - 1) * 0.5)
-        pts.append((x1 + dx * f + qx * o, y1 + dy * f + qy * o))
-    pts.append((x2, y2))
-    return pts
-
-
-class Ore:
-    """Bryłka surowca: dryfuje, a gdy jesteś blisko i masz miejsce w ładowni, leci do statku."""
-    MAGNET = 520
-
-    def __init__(self, x, y, kind, dx, dy, amount=1):
-        self.x, self.y, self.dx, self.dy = x, y, dx, dy
-        self.kind = kind
-        self.amount = amount     # ile jednostek surowca niesie ta bryłka
-        self.life = 1500
-        self.age = 0
-        self.pull = 0            # klatki, przez które bryłka jest przyciągana bez względu na odległość (Ore Pulse)
-
-    def update(self, player, can_pick, magnet=None):
-        """Zwraca True, gdy bryłka została zebrana."""
-        self.age += DT_SCALE
-        self.life -= DT_SCALE
-        mg = magnet or self.MAGNET
-        px, py = player.x - self.x, player.y - self.y
-        d = math.hypot(px, py) or 1.0
-        if self.pull > 0:
-            self.pull -= DT_SCALE
-        if can_pick and (d < mg or self.pull > 0):
-            spd = 22.0 if self.pull > 0 else min(22.0, 7.0 + (mg - d) * 0.09)
-            lerp = min(1.0, 0.3 * DT_SCALE)
-            self.dx += (px / d * spd - self.dx) * lerp
-            self.dy += (py / d * spd - self.dy) * lerp
-        else:
-            self.dx *= 0.99 ** DT_SCALE
-            self.dy *= 0.99 ** DT_SCALE
-        self.x += self.dx * DT_SCALE
-        self.y += self.dy * DT_SCALE
-        return can_pick and d < player.R + 16
-
-    def draw(self, canvas):
-        x, y = sp(self.x, self.y)
-        c = ORE[self.kind]["color"]
-        if self.life < 240 and (int(self.life) // 6) % 2:  # migocze tuż przed zniknięciem
-            return
-        if self.amount >= 20:    # duże bryłki są większe i błyszczą
-            canvas.fill(NAVY, (x - 3, y - 3, 7, 7))
-            canvas.fill(c, (x - 2, y - 2, 5, 5))
-            canvas.fill(WHITE, (x - 1, y - 1, 2, 2) if (int(self.age) // 5) % 2 else (x, y, 1, 1))
-        elif self.amount >= 5:
-            canvas.fill(NAVY, (x - 2, y - 2, 5, 5))
-            canvas.fill(c, (x - 1, y - 1, 3, 3))
-            if (int(self.age) // 6) % 2 == 0:
-                canvas.fill(WHITE, (x, y, 1, 1))
-        else:
-            canvas.fill(NAVY, (x, y + 1, 3, 1))
-            canvas.fill(c, (x - 1, y, 3, 1))
-            canvas.fill(c, (x, y - 1, 1, 3))
-            if (int(self.age) // 6) % 2 == 0:
-                canvas.fill(WHITE, (x, y, 1, 1))
-
-
-# --------------------
-# Planety: nieregularny brzeg i wystające kryształy / bryły rudy (dorysowywane do arkusza przy starcie)
-# --------------------
-PLANET_PAD = 32            # o tyle powiększamy obrazek planety z każdej strony, żeby zmieściły się wystające kryształy
-OUTCROP = {  # rampa (ciemny -> jasny), styl: prism = kryształy, shard = cienkie odłamki, chunk = kanciaste bryły
-    "iron": ([(93, 39, 60), (160, 70, 50), (239, 125, 87), (255, 190, 140)], "chunk", False),
-    "crystal": ([(30, 80, 120), (56, 170, 200), (115, 239, 247), (230, 255, 255)], "prism", False),
-    "gold": ([(130, 70, 40), (210, 140, 50), (255, 205, 117), (255, 250, 210)], "chunk", False),
-    "titanium": ([(70, 80, 105), (140, 155, 180), (200, 215, 235), (250, 252, 255)], "shard", False),
-    "emerald": ([(20, 70, 50), (37, 130, 80), (56, 200, 110), (180, 255, 170)], "prism", False),
-    "plasma": ([(90, 30, 90), (170, 60, 160), (230, 100, 210), (255, 200, 250)], "prism", True),
-    "voidium": ([(40, 20, 80), (90, 50, 170), (150, 100, 255), (225, 205, 255)], "prism", True),
-}
-DEAD_RAMP = [(26, 28, 44), (51, 60, 87), (86, 100, 124), (130, 146, 166)]
-LIGHT2 = (-0.6, -0.8)      # kierunek światła na arkuszu planet (z lewej-góry)
-
-
-def _shade(c, f):
-    return tuple(max(0, min(255, int(v * f))) for v in c[:3])
-
-
-def rugged_planet(img, kind, variant, depleted):
-    """Zwraca większy obrazek planety: garby i wyszczerbienia na brzegu + klastry kryształów / rudy.
-    Kryształy na nocnej stronie planety są przyciemnione (świecące rodzaje świecą zawsze)."""
-    rng = random.Random(ORE_KINDS.index(kind) * 31 + variant * 7 + 5)   # deterministycznie: stały wygląd planet
-    S = img.get_width() + 2 * PLANET_PAD
-    out = pygame.Surface((S, S), pygame.SRCALPHA)
-    out.blit(img, (PLANET_PAD, PLANET_PAD))
-    c = S / 2
-    R = img.get_bounding_rect().width / 2
-    ramp, style, glows = OUTCROP[kind]
-    if depleted:
-        ramp, glows = DEAD_RAMP, False
-
-    def lit(a):
-        """Oświetlenie planety w kierunku a: 1 = strona dzienna, 0 = noc."""
-        return max(0.0, min(1.0, 0.55 + 0.9 * (math.cos(a) * LIGHT2[0] + math.sin(a) * LIGHT2[1])))
-
-    def sample(a, r):
-        x, y = int(c + math.cos(a) * r), int(c + math.sin(a) * r)
-        return out.get_at((x, y))
-
-    # 1) nierówny brzeg: promień zmienia się z kątem (suma kilku sinusów), teren "wylewa się" lub zapada
-    ph = [rng.uniform(0, math.tau) for _ in range(3)]
-    amp = (2.6, 1.8, 1.1)
-
-    def edge(a):
-        return R - 1 + amp[0] * math.sin(3 * a + ph[0]) + amp[1] * math.sin(7 * a + ph[1]) + amp[2] * math.sin(15 * a + ph[2])
-
-    src = out.copy()
-    n_ang = 1600
-    for i in range(n_ang):
-        a = i * math.tau / n_ang
-        ca, sa = math.cos(a), math.sin(a)
-        e = edge(a)
-        fill = src.get_at((int(c + ca * (R - 9)), int(c + sa * (R - 9))))
-        for r in range(int(R - 7), int(R + 7)):
-            p = (int(c + ca * r), int(c + sa * r))
-            if r > e:
-                out.set_at(p, (0, 0, 0, 0))
-            elif src.get_at(p).a == 0 or r > R - 3:
-                out.set_at(p, fill)
-    for i in range(n_ang):   # obrys nowego brzegu
-        a = i * math.tau / n_ang
-        r = int(edge(a))
-        p = (int(c + math.cos(a) * r), int(c + math.sin(a) * r))
-        out.set_at(p, (20, 20, 34, 255))
-
-    def prism(bx, by, a, length, width, shade):
-        """Graniastosłup: dwie ściany (oświetlona i w cieniu), grzbiet i jasny czubek."""
-        dx, dy = math.cos(a), math.sin(a)
-        nx, ny = -dy, dx
-        tip = (bx + dx * length, by + dy * length)
-        sL = (bx + dx * length * 0.72 + nx * width * 0.5, by + dy * length * 0.72 + ny * width * 0.5)
-        sR = (bx + dx * length * 0.72 - nx * width * 0.5, by + dy * length * 0.72 - ny * width * 0.5)
-        bL = (bx + nx * width * 0.5, by + ny * width * 0.5)
-        bR = (bx - nx * width * 0.5, by - ny * width * 0.5)
-        mid = (bx + dx * length * 0.72, by + dy * length * 0.72)
-        left_lit = nx * LIGHT2[0] + ny * LIGHT2[1] > 0
-        t = lambda i: (*_shade(ramp[max(0, min(3, i))], shade), 255)
-        pygame.draw.polygon(out, (20, 20, 34), [bL, sL, tip, sR, bR], 0)
-        pygame.draw.polygon(out, (20, 20, 34), [bL, sL, tip, sR, bR], 2)
-        pygame.draw.polygon(out, t(2 if left_lit else 1), [bL, sL, tip, mid, (bx, by)])
-        pygame.draw.polygon(out, t(1 if left_lit else 2), [(bx, by), mid, tip, sR, bR])
-        pygame.draw.line(out, t(3), (bx, by), tip)
-        pygame.draw.line(out, t(3), mid, tip, 2 if width > 6 else 1)
-        return tip
-
-    def chunk(bx, by, a, size, shade):
-        """Kanciasta bryła rudy: nieregularny wielokąt z jasną górną-lewą krawędzią."""
-        pts = []
-        n = rng.randint(5, 7)
-        for i in range(n):
-            ang = a + i * math.tau / n + rng.uniform(-0.3, 0.3)
-            rr = size * rng.uniform(0.6, 1.0)
-            pts.append((bx + math.cos(ang) * rr, by + math.sin(ang) * rr * 0.85))
-        t = lambda i: (*_shade(ramp[max(0, min(3, i))], shade), 255)
-        pygame.draw.polygon(out, (20, 20, 34), pts, 0)
-        pygame.draw.polygon(out, (20, 20, 34), pts, 2)
-        inner = [(bx + (x - bx) * 0.85, by + (y - by) * 0.85) for x, y in pts]
-        pygame.draw.polygon(out, t(1), inner)
-        lit_pts = [(bx + (x - bx) * 0.7 + LIGHT2[0] * size * 0.18, by + (y - by) * 0.7 + LIGHT2[1] * size * 0.18)
-                   for x, y in pts]
-        pygame.draw.polygon(out, t(2), lit_pts)
-        hx, hy = bx + LIGHT2[0] * size * 0.4, by + LIGHT2[1] * size * 0.4
-        pygame.draw.circle(out, t(3), (hx, hy), max(1, size * 0.18))
-        return hx, hy
-
-    glow_layer = pygame.Surface((S, S), pygame.SRCALPHA) if glows else None
-    tips = []
-    # 3) klastry na brzegu: sterczą na zewnątrz i łamią okrągły kształt
-    n_rim = rng.randint(4, 6)
-    base_a = rng.uniform(0, math.tau)
-    for i in range(n_rim):
-        a = base_a + i * math.tau / n_rim + rng.uniform(-0.35, 0.35)
-        shade = 0.4 + 0.6 * lit(a)
-        bx, by = c + math.cos(a) * (R - 8), c + math.sin(a) * (R - 8)
-        for j in range(rng.randint(3, 4)):
-            aa = a + rng.uniform(-0.5, 0.5) * (0.4 if j == 0 else 1.0)
-            ox, oy = rng.uniform(-5, 5), rng.uniform(-5, 5)
-            if style == "chunk":
-                size = rng.uniform(8, 14) * (0.55 if depleted else 1.0)
-                tips.append(chunk(bx + ox + math.cos(aa) * size * 0.6, by + oy + math.sin(aa) * size * 0.6, aa, size, shade))
-            else:
-                length = (rng.uniform(26, 38) if j == 0 else rng.uniform(14, 26)) * (1.0 if style == "prism" else 0.8)
-                width = rng.uniform(8, 12) if style == "prism" else rng.uniform(4, 6)
-                if depleted:
-                    length *= 0.35
-                tips.append(prism(bx + ox, by + oy, aa, length, width, shade))
-    # 4) mniejsze wychodnie na oświetlonej powierzchni (patrzymy z góry, więc są krótsze)
-    for _ in range(rng.randint(2, 3)):
-        a = rng.uniform(math.radians(160), math.radians(290))
-        r = rng.uniform(0.25, 0.7) * R
-        bx, by = c + math.cos(a) * r, c + math.sin(a) * r
-        for j in range(rng.randint(2, 3)):
-            aa = a + rng.uniform(-0.8, 0.8)
-            if style == "chunk":
-                tips.append(chunk(bx + rng.uniform(-4, 4), by + rng.uniform(-4, 4), aa, rng.uniform(6, 9), 1.0))
-            else:
-                tips.append(prism(bx + rng.uniform(-3, 3), by + rng.uniform(-3, 3), aa,
-                                  rng.uniform(12, 18) * (0.4 if depleted else 1.0), rng.uniform(6, 8), 1.0))
-    if glow_layer is not None:   # poświata świecących kryształów (widoczna także na nocnej stronie)
-        col = ramp[2]
-        for x, y in tips:
-            for rr, al in ((10, 26), (6, 40), (3, 70)):
-                pygame.draw.circle(glow_layer, (*col, al), (x, y), rr)
-        glow_layer.blit(out, (0, 0))
-        out = glow_layer
-    return out
-
-
-class Planet:
-    """Mini-planeta z surowcem. Kolejne trafienia wykuwają bryłki, aż zasób się wyczerpie."""
-
-    def __init__(self, x, y, kind, variant, ore, field_r=0.0):
-        self.x, self.y = x, y
-        self.kind, self.variant = kind, variant
-        self.R = RES_R
-        self.max_ore = self.ore_left = ore
-        self.flash = 0
-        self.field_r = field_r   # > 0: wokół planety jest skupisko asteroid o tym promieniu
-
-    @property
-    def depleted(self):
-        return self.ore_left <= 0
-
-    def hit(self, dmg):
-        """Zwraca liczbę wykutych jednostek surowca (trafienie daje MINE_YIELD razy obrażenia)."""
-        if self.depleted:
-            return 0
-        n = min(dmg * MINE_YIELD, self.ore_left)
-        self.ore_left -= n
-        self.flash = 3
-        return n
-
-
-def planet_kind_for(d, r):
-    """Im dalej od bazy, tym cenniejsze surowce: iron -> titanium/crystal -> gold -> emerald -> plasma -> voidium."""
-    if d < 8500:
-        return "iron"
-    if d < 13000:
-        return "iron" if r < 0.5 else ("titanium" if r < 0.75 else "crystal")
-    if d < 20000:
-        return "iron" if r < 0.15 else ("titanium" if r < 0.4 else ("crystal" if r < 0.7 else "gold"))
-    if d < 30000:
-        return "crystal" if r < 0.25 else ("gold" if r < 0.6 else "emerald")
-    if d < 45000:
-        return "gold" if r < 0.25 else ("emerald" if r < 0.7 else "plasma")
-    return "emerald" if r < 0.25 else ("plasma" if r < 0.65 else "voidium")
-
-
-class World:
-    """Nieskończony świat: mini-planety generowane deterministycznie z 'kafelków' (chunków)."""
-
-    def __init__(self, seed):
-        self.seed = seed
-        self.cache = {}
-        self._near = {}
-
-    def chunk_planet(self, cx, cy):
-        key = (cx, cy)
-        if key in self.cache:
-            return self.cache[key]
-        rng = random.Random(((cx * 73856093) ^ (cy * 19349663) ^ (self.seed * 83492791)) & 0xFFFFFFFF)
-        px = (cx + 0.15 + 0.7 * rng.random()) * CHUNK   # margines: planety z sąsiednich kafelków się nie stykają
-        py = (cy + 0.15 + 0.7 * rng.random()) * CHUNK
-        roll, kind_roll = rng.random(), rng.random()
-        variant = rng.randrange(2)
-        jitter = rng.uniform(0.85, 1.15)
-        field_roll, field_size = rng.random(), rng.uniform(1500, 2400)   # losowane na końcu: pozycje planet się nie zmieniają
-        d = math.hypot(px, py)
-        planet = None
-        if d >= PLANET_MIN_D and roll < (0.75 if d < 16000 else 0.5):   # bliżej bazy planet jest więcej
-            kind = planet_kind_for(d, kind_roll)
-            ore = {"iron": 420, "crystal": 320, "gold": 220, "titanium": 380, "emerald": 200, "plasma": 150,
-                   "voidium": 100}[kind] * 6 * jitter * (1 + d / 15000)  # dalej = bogatsze
-            planet = Planet(px, py, kind, variant, max(300, int(ore)),
-                            field_size if (field_roll < 0.4 and d > SAFE_R + 1200) else 0.0)  # skupisko ma ok. 40% planet
-        self.cache[key] = planet
-        return planet
-
-    def reset(self):
-        self.cache.clear()
-        self._near = {}
-
-    def near(self, x, y, span=4):
-        cx, cy = int(x // CHUNK), int(y // CHUNK)
-        ent = self._near.get(span)
-        if ent is None or ent[0] != (cx, cy):
-            out = []
-            for i in range(cx - span, cx + span + 1):
-                for j in range(cy - span, cy + span + 1):
-                    p = self.chunk_planet(i, j)
-                    if p is not None:
-                        out.append(p)
-            ent = self._near[span] = ((cx, cy), out)
-        return ent[1]
-
-
-WORLD = World(WORLD_SEED)
-
-
-def nearest_asteroid(world, x, y):
-    best, best_d = None, 1e18
-    for e in world:
-        if e.name == "asteroid" and e.life:
-            d = (e.x - x) ** 2 + (e.y - y) ** 2
-            if d < best_d:
-                best, best_d = e, d
-    return best
-
-
-def is_collide(a, b):
-    return (b.x - a.x) ** 2 + (b.y - a.y) ** 2 < (a.R + b.R) ** 2
-
-
-def zone_tier(d):
-    """-1 = strefa bezpieczna; 0, 1, 2... = kolejne pierścienie coraz twardszych asteroid."""
-    if d < SAFE_R:
-        return -1
-    return int((d - SAFE_R) // TIER_STEP)
-
-
-def pad_angle(k):
-    return PAD_OFFSET + k * (math.tau / N_PADS)
-
-
-def pad_pos(k):
-    a = pad_angle(k)
-    return math.cos(a) * PAD_R, math.sin(a) * PAD_R
-
-
-# --------------------
-# Tempo progresji: mnożniki kosztów (zwiększ, żeby gra trwała dłużej, zmniejsz, żeby szła szybciej)
-# --------------------
-COST_MULT = 2.6        # kredyty: ulepszenia statku i statki
-DRONE_COST_MULT = 1.9  # kredyty: drony i technologia dronów
-BUILD_MULT = 8.0       # surowce potrzebne do rozbudowy bazy (jednostek jest teraz ok. 5x więcej niż kiedyś)
-LEVEL_STEEP = 0.12     # każdy kolejny poziom drożeje dodatkowo o tyle
-MINE_YIELD = 5         # ile jednostek surowca daje jedno trafienie w planetę (razy obrażenia pocisku)
-FIELD_TARGET = 34      # ile asteroid utrzymuje się w skupisku wokół planety
-COLOSSUS_R = 140       # promień kolosalnej asteroidy (logika)
-ROCK_UNITS = {  # ile jednostek surowca zostawia zniszczona asteroida (traktor-beam daje 2x więcej)
-    "iron": {"small": 3, "large": 6, "colossus": 40},
-    "gold": {"small": 3, "large": 9, "colossus": 25},
-    "titanium": {"small": 2, "large": 4, "colossus": 28},
-}
-
-
-def round10(x):
-    return max(10, int(x / 10 + 0.5) * 10)
-
-
-def scaled(costs, mult):
-    """Koszty kolejnych poziomów: baza * mnożnik * (1 + LEVEL_STEEP * numer poziomu)."""
-    return [round10(c * mult * (1 + LEVEL_STEEP * i)) for i, c in enumerate(costs)]
-
-
-def scaled_build(costs):
-    """To samo dla kosztów w surowcach (słowniki)."""
-    return [{k: max(1, int(round(n * BUILD_MULT * (1 + LEVEL_STEEP * i)))) for k, n in c.items()}
-            for i, c in enumerate(costs)]
-
-
-# --------------------
-# Dane: statki i ulepszenia (za kredyty)
-# --------------------
-SHIPS = [
-    dict(id="scout", name="SCOUT", cost=0, radius=24, speed=1.0, turn=3.0, fire=1.0, shields=0, dmg=1,
-         ability="repair", reactive=False, beam=False, cargo_mult=1, mine_bonus=0, magnet=1.0,
-         missiles=False, missile_reload=1.0, missile_dmg=0,
-         sheet="fr_ship.png", stats=(3, 3, 3, 3),
-         perk=("BALANCED ALL-ROUNDER", "SHIFT: FIELD REPAIR", "RESTORES SHIELD CHARGES")),
-    dict(id="interceptor", name="INTERCEPTOR", cost=round10(450 * COST_MULT), radius=17, speed=1.35, turn=4.5,
-         fire=1.25, shields=0, dmg=1, ability="dash", reactive=False, beam=False, cargo_mult=1, mine_bonus=0,
-         magnet=1.0, missiles=False, missile_reload=1.0, missile_dmg=0,
-         sheet="fr_ship_interceptor.png", stats=(5, 5, 2, 2),
-         perk=("SHIFT: PHASE DASH", "EXCLUSIVE: SHOCKWAVE [E]", "TINY HITBOX, GUNS -25%")),
-    dict(id="striker", name="STRIKER", cost=round10(700 * COST_MULT), radius=22, speed=1.15, turn=3.6,
-         fire=0.85, shields=0, dmg=1, ability="overdrive", reactive=False, beam=False, cargo_mult=1, mine_bonus=0,
-         magnet=1.0, missiles=True, missile_reload=0.6, missile_dmg=0,
-         sheet="fr_ship_striker.png", stats=(4, 4, 5, 1),
-         perk=("SHIFT: OVERDRIVE", "EXCLUSIVE: HOMING MISSILES", "GLASS CANNON, FAST RELOAD")),
-    dict(id="heavy", name="BRUISER", cost=round10(800 * COST_MULT), radius=32, speed=0.8, turn=2.0, fire=0.8,
-         shields=1, dmg=2, ability=None, reactive=True, beam=False, cargo_mult=1, mine_bonus=0, magnet=1.0,
-         missiles=True, missile_reload=1.0, missile_dmg=2,
-         sheet="fr_ship_heavy.png", stats=(2, 1, 4, 5),
-         perk=("2X DMG BULLETS, +1 SHIELD", "TURRET + MISSILE CLUSTERS", "SHIELD HIT = BLAST")),
-    dict(id="surveyor", name="SURVEYOR", cost=round10(1000 * COST_MULT), radius=20, speed=1.1, turn=3.4, fire=1.35,
-         shields=0, dmg=1, ability="scan", reactive=False, beam=False, cargo_mult=1, mine_bonus=1, magnet=1.0,
-         missiles=False, missile_reload=1.0, missile_dmg=0,
-         sheet="fr_ship_surveyor.png", stats=(3, 4, 1, 2),
-         perk=("SHIFT: DEEP SCAN", "MAP X2 + PLANET ARROWS", "MINING LASER: +ORE/HIT")),
-    dict(id="harvester", name="HARVESTER", cost=round10(1400 * COST_MULT), radius=26, speed=0.9, turn=2.6, fire=1.6,
-         shields=0, dmg=1, ability=None, reactive=False, beam=True, cargo_mult=2, mine_bonus=0, magnet=1.0,
-         missiles=False, missile_reload=1.0, missile_dmg=0,
-         sheet="fr_ship_harvester.png", stats=(3, 3, 1, 2),
-         perk=("AUTO TRACTOR BEAM:", "PULLS ASTEROIDS INTO CARGO", "CARGO HOLD X2, MORE BEAMS")),
-    dict(id="hauler", name="HAULER", cost=round10(1800 * COST_MULT), radius=34, speed=0.7, turn=1.8, fire=1.5,
-         shields=1, dmg=1, ability="pulse", reactive=False, beam=False, cargo_mult=4, mine_bonus=0, magnet=1.6,
-         missiles=False, missile_reload=1.0, missile_dmg=0,
-         sheet="fr_ship_hauler.png", stats=(1, 1, 2, 4),
-         perk=("CARGO HOLD X4, +1 SHIELD", "SHIFT: GRAVITY WELL", "PULLS + CRUSHES, KNOCKBACK")),
-]
-# płomienie silników: wymiary korpusu (px sprite'a), pozycje dysz (x w px korpusu), szerokość i długość płomienia, paleta
-SHIP_FX = {
-    "scout": dict(body=(21, 25), nozzles=(8, 12), w=5, L=14, pal="blue"),
-    "interceptor": dict(body=(17, 29), nozzles=(7, 9), w=4, L=16, pal="blue"),
-    "striker": dict(body=(23, 27), nozzles=(9, 13), w=5, L=14, pal="fire"),
-    "heavy": dict(body=(33, 28), nozzles=(11, 16, 21), w=6, L=15, pal="fire"),
-    "surveyor": dict(body=(21, 27), nozzles=(10,), w=7, L=14, pal="green"),
-    "harvester": dict(body=(29, 27), nozzles=(10, 14, 18), w=5, L=13, pal="fire"),
-    "hauler": dict(body=(35, 30), nozzles=(13, 17, 21), w=6, L=16, pal="fire"),
-}
-ABILITY_NAME = {"dash": "DASH", "overdrive": "OVERDRIVE", "scan": "DEEP SCAN", "pulse": "GRAVITY WELL",
-                "repair": "REPAIR"}
-STAT_NAMES = ("SPEED", "TURN", "FIRE", "ARMOR")
-
-UPGRADES = [  # wspólne dla wszystkich statków
-    dict(key="cargo", name="CARGO HOLD", costs=scaled([80, 160, 300, 520, 850, 1400, 2400, 4000, 6500, 10000, 16000,
-                                                       22000, 34000, 52000, 80000, 120000, 180000, 270000, 400000,
-                                                       600000, 900000, 1300000], COST_MULT)),
-    dict(key="fire", name="FIRE RATE", costs=scaled([40, 60, 90, 130, 180, 250, 350], COST_MULT)),
-    dict(key="engine", name="ENGINE", costs=scaled([30, 45, 65, 90, 120, 160, 210, 270], COST_MULT)),
-    dict(key="double", name="DOUBLE SHOT", costs=scaled([400], COST_MULT)),
-    dict(key="shield", name="SHIELD", costs=scaled([150, 280, 450], COST_MULT)),
-]
-
-# ulepszenia specjalne: każdy statek ma własne linie rozwoju (rakiety dzielą Bruiser i Striker)
-SPECIAL_DEFS = {
-    "repair": ("FIELD REPAIR", [300, 700, 1500, 3200, 7000, 15000]),
-    "salvage": ("SALVAGE CREW", [500, 1100, 2400, 5200, 11000]),
-    "autorepair": ("NANO REGEN", [700, 1600, 3600, 8000]),
-    "dash": ("PHASE DASH", [500, 1000, 2000, 4200, 9000, 19000]),
-    "wave": ("SHOCKWAVE", [250, 420, 650, 1400, 2600]),
-    "guns": ("TWIN-LINK GUNS", [600, 1300, 2800, 6000]),
-    "overdrive": ("OVERDRIVE", [600, 1200, 2400, 5000, 10500, 22000]),
-    "combo": ("KILL COMBO", [800, 1800, 4000, 9000]),
-    "missile": ("HOMING MISSILES", [250, 420, 650, 1100, 1800, 3200]),
-    "turret": ("AUTO TURRET", [600, 1000, 1600, 3800, 7500, 15000]),
-    "reactive": ("REACTIVE ARMOR", [500, 1100, 2200, 4800, 10000]),
-    "scan": ("DEEP SCAN", [500, 1100, 2200, 4600, 9500, 20000]),
-    "prospect": ("MINING LASER", [700, 1500, 3000, 6200, 13000]),
-    "optics": ("LONG OPTICS", [600, 1300, 2800, 6000]),
-    "beam": ("TRACTOR BEAM", [700, 1600, 3400, 6500, 12500, 24000, 48000]),
-    "silo": ("CARGO SILO", [700, 1500, 3200, 7000, 15000]),
-    "refine": ("ORE REFINER", [900, 2000, 4500, 10000]),
-    "pulse": ("GRAVITY WELL", [600, 1200, 2400, 4800, 9000, 17000, 32000, 60000]),
-    "megahold": ("MEGA HOLD", [800, 1800, 4000, 9000, 20000]),
-    "coils": ("MAGNET COILS", [500, 1100, 2400, 5200, 11000]),
-}
-SPECIALS = {  # statek -> klucze ulepszeń (każdy ma 3 linie)
-    "scout": ("repair", "salvage", "autorepair"),
-    "interceptor": ("dash", "wave", "guns"),
-    "striker": ("overdrive", "missile", "combo"),
-    "heavy": ("turret", "missile", "reactive"),
-    "surveyor": ("scan", "prospect", "optics"),
-    "harvester": ("beam", "silo", "refine"),
-    "hauler": ("pulse", "megahold", "coils"),
-}
-SPECIAL_ROWS = {key: dict(key=key, name=n, costs=scaled(c, COST_MULT)) for key, (n, c) in SPECIAL_DEFS.items()}
-ALL_UPGRADE_COSTS = {u["key"]: u["costs"] for u in UPGRADES}
-ALL_UPGRADE_COSTS.update({k: r["costs"] for k, r in SPECIAL_ROWS.items()})
-
-# --- Scout: Field Repair
-REPAIR_CD = (60.0, 45.0, 30.0, 20.0, 16.0, 12.0, 9.0)
-REPAIR_N = (1, 1, 2, 3, 3, 4, 5)        # poziom 5+: dodatkowo chwila nietykalności
-SALVAGE_BONUS = 0.20                    # Salvage Crew (Scout): dodatek do łupów z asteroid na poziom
-AUTOREPAIR_SECS = (0.0, 40.0, 30.0, 20.0, 12.0)   # Nano Regen (Scout): co ile s wraca 1 ładunek tarczy
-# --- Interceptor: Phase Dash (poziom 2 = taranowanie, 3 = dłuższy dash) i Shockwave (poziom 4/5 = kilka uderzeń)
-DASH_CD = (3.5, 2.6, 2.2, 1.8, 1.6, 1.4, 1.2)
-DASH_SPEED_MULT = (1.0, 1.0, 1.0, 1.3, 1.3, 1.3, 1.5)
-DASH_RAM_DMG = 8
-DASH_TRAIL_DMG = 3         # poziom 4: sunąca za dashem smuga rani asteroidy
-GUNS_BONUS = 0.07          # Twin-Link Guns (Interceptor): o tyle mniejsza kara do szybkostrzelności na poziom
-WAVE_RADIUS = [320, 400, 480, 480, 520]
-WAVE_COOLDOWN = [18.0, 14.0, 10.0, 10.0, 9.0]
-WAVE_DAMAGE = [8, 12, 16, 16, 18]
-WAVE_PULSES = [1, 1, 1, 2, 3]
-# --- Striker: Overdrive
-OVERDRIVE_SECS = (6.0, 8.0, 10.0, 10.0, 12.0, 14.0, 16.0)
-OVERDRIVE_CD = (30.0, 30.0, 24.0, 24.0, 20.0, 18.0, 15.0)
-OVERDRIVE_CAP = 20.0       # poziom 3: każde zabójstwo wydłuża Overdrive, ale do tylu sekund
-COMBO_MAX = (0, 4, 8, 12, 20)   # Kill Combo (Striker): maks. liczba stosów, każdy +5% szybkostrzelności
-COMBO_STEP = 0.05
-COMBO_FRAMES = 150              # ile klatek bez zabójstwa gasi combo
-# --- rakiety (Bruiser i Striker): więcej rakiet, a na 6. poziomie bomby kasetowe
-MISSILE_N = (1, 2, 3, 4, 5, 5)
-CLUSTER_LEVEL = 6
-CLUSTER_BOMBLETS = 9
-# --- Bruiser: Reactive Armor
-REACTIVE_R = (240, 320, 400, 480, 560, 640)
-REACTIVE_DMG = (6, 10, 14, 20, 28, 40)   # poziom 4+: odrzut asteroid, poziom 5: 30% szansy na zwrot ładunku tarczy
-# --- Surveyor: Deep Scan
-SCAN_SECS = (20.0, 30.0, 30.0, 30.0, 40.0, 40.0, 60.0)
-SCAN_CD = (45.0, 35.0, 35.0, 30.0, 25.0, 20.0, 15.0)
-SCAN_MULTS = (2.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0)   # poziom 4: etykiety z ilością surowca, 5: +2 ore/trafienie podczas skanu, 6: 3x łupy
-OPTICS_BONUS = 0.25        # Long Optics (Surveyor): dodatek do zasięgu pocisków na poziom
-# --- Harvester: traktor-beamy
-BEAM_N = (1, 1, 2, 3, 3, 4, 5, 6)
-BEAM_POWER = (1.0, 1.6, 1.6, 2.0, 2.4, 2.4, 2.8, 3.2)
-BEAM_RANGE_MULT = (1.0, 1.3, 1.3, 1.5, 1.7, 1.7, 2.0, 2.3)
-BEAM_YIELD = (1.0, 1.25, 1.25, 1.5, 1.75, 1.75, 2.0, 2.5)
-SILO_BONUS = 0.20          # Cargo Silo (Harvester): dodatek do ładowni na poziom
-REFINE_CHANCE = (0.0, 0.25, 0.5, 0.75, 1.0)   # Ore Refiner: część iron z beamów zamienia się w titanium
-COILS_BONUS = 0.35         # Magnet Coils (Hauler): dodatek do zasięgu magnesu na poziom
-# --- Hauler: Gravity Well
-WELL_R = (1600, 1900, 2200, 2500, 3000, 3400, 3800, 4200, 4800)
-WELL_SECS = (2.5, 3.0, 3.5, 4.0, 5.0, 5.5, 6.0, 6.5, 7.5)
-WELL_CD = (10.0, 9.0, 8.0, 7.0, 6.0, 5.5, 5.0, 4.5, 4.0)
-WELL_CRUSH = (5, 8, 12, 16, 24, 32, 44, 60, 90)
-WELL_KNOCK = 14.0          # prędkość odrzutu asteroid, gdy studnia się kończy
-MEGAHOLD_BONUS = 0.20      # Mega Hold (Hauler): dodatek do pojemności ładowni na poziom
-
-# automatyczne działko (tylko Bruiser)
-TURRET_COOLDOWN = (0.55, 0.38, 0.24, 0.24, 0.20, 0.16)   # poziom 5: dwie lufy, poziom 6: rakiety kasetowe
-TURRET_RANGE = (520, 580, 640, 700, 760, 820)
-TURRET_MISSILE_CD = 2.4    # poziom 4: działko dodatkowo wystrzeliwuje salwy rakiet samonaprowadzających
-
-# rozbudowa bazy: koszt w SUROWCACH, wpłacany z ładunku przy lądowaniu i z dostaw dronów
-BASE_MODULES = [
-    dict(key="drill", name="DRILL RIGS", costs=scaled_build([
-        {"iron": 20}, {"iron": 35}, {"iron": 55}, {"iron": 80, "crystal": 5}, {"iron": 110, "crystal": 10},
-        {"iron": 150, "crystal": 20}, {"iron": 200, "crystal": 30}, {"iron": 260, "crystal": 45}])),
-    dict(key="refinery", name="REFINERY", costs=scaled_build([
-        {"crystal": 10}, {"crystal": 18}, {"crystal": 30}, {"crystal": 45, "gold": 4}, {"crystal": 70, "gold": 8}])),
-    dict(key="vault", name="VAULT", costs=scaled_build([
-        {"gold": 6}, {"gold": 10}, {"gold": 16}, {"gold": 24}, {"gold": 36}, {"gold": 50}])),
-]
-
-
-def raw_build(costs):
-    """Koszty w surowcach bez mnożnika BUILD_MULT (zera są pomijane)."""
-    return [{k: n for k, n in c.items() if n > 0} for c in costs]
-
-
-# ulepszenia planety-bazy: płacisz kredytami (przy starcie projektu) i surowcami (z ładunku i dostaw dronów)
-BASE_MODULES += [
-    dict(key="scanner", name="SCANNER ARRAY", costs=raw_build([
-        {"titanium": 300}, {"titanium": 600}, {"titanium": 1100}, {"titanium": 1800}, {"titanium": 3000}]),
-         credits=[15000, 40000, 100000, 250000, 600000]),
-    dict(key="trade", name="TRADE HUB", costs=raw_build([
-        {"emerald": 120}, {"emerald": 250}, {"emerald": 500}, {"emerald": 900}, {"emerald": 1500}]),
-         credits=[30000, 80000, 200000, 500000, 1200000]),
-    dict(key="shield", name="SHIELD GRID", costs=raw_build([
-        {"plasma": 60}, {"plasma": 160}, {"plasma": 400}]),
-         credits=[80000, 300000, 900000]),
-    dict(key="warp", name="WARP BEACON", costs=raw_build([
-        {"voidium": 30, "plasma": 40}, {"voidium": 80, "plasma": 100}, {"voidium": 200, "plasma": 250}]),
-         credits=[150000, 500000, 1500000]),
-    dict(key="engine", name="ENGINE LAB", costs=raw_build([
-        {"titanium": 500}, {"titanium": 1000, "plasma": 40}, {"titanium": 2000, "plasma": 100},
-        {"titanium": 3500, "plasma": 220}]),
-         credits=[60000, 160000, 420000, 1000000]),
-    dict(key="ring", name="ORBITAL RING", costs=raw_build([
-        {"voidium": 150, "plasma": 200, "emerald": 300}, {"voidium": 400, "plasma": 500, "emerald": 800},
-        {"voidium": 1000, "plasma": 1200, "emerald": 2000}]),
-         credits=[1000000, 3500000, 10000000]),
-]
-TRADE_BONUS = 0.10         # Trade Hub: dodatek do ceny sprzedaży na poziom
-SCANNER_BONUS = 0.20       # Scanner Array: dodatek do zasięgu minimapy na poziom
-ENGINE_BONUS = 0.08        # Engine Lab: dodatek do mocy i prędkości silników na poziom
-RING_MULT = (1, 2, 4, 8)   # Orbital Ring: mnożnik pasywnego dochodu
-DRILL_INCOME = (0, 15, 30, 50, 80, 120, 170, 230, 300)   # kredytów na minutę (poziom 0..8)
-REFINERY_BONUS = (0.0, 0.12, 0.24, 0.36, 0.50, 0.65)     # dodatek do ceny sprzedaży surowców
-VAULT_MINUTES = (10, 20, 30, 45, 60, 90, 120)            # ile minut dochodu mieści skarbiec
-
-# drony górnicze: kupowane za kredyty, latają same i dostarczają surowce do bazy
-DRONE_COSTS = tuple(scaled([1500, 2500, 4000, 6500, 10000, 15000, 22000, 32000, 46000, 65000], DRONE_COST_MULT))
-DRONE_TECH_COSTS = tuple(scaled([1200, 2500, 5000, 9000, 16000, 28000], DRONE_COST_MULT))
-DRONE_TECH = (  # (sztuk surowca na wyprawę, sekund wyprawy, skład ładunku)
-    (72, 60, {"iron": 1.0}),
-    (90, 55, {"iron": 1.0}),
-    (108, 50, {"iron": 0.7, "crystal": 0.3}),
-    (132, 45, {"iron": 0.5, "crystal": 0.4, "gold": 0.1}),
-    (156, 40, {"iron": 0.3, "crystal": 0.45, "gold": 0.25}),
-    (180, 36, {"crystal": 0.2, "gold": 0.3, "titanium": 0.3, "emerald": 0.2}),
-    (210, 32, {"gold": 0.2, "titanium": 0.2, "emerald": 0.35, "plasma": 0.25}),
-)
-
-
-def module_by_key(key):
-    return next(m for m in BASE_MODULES if m["key"] == key)
-
-
-def income_rate(base):
-    """Pasywny dochód (kredytów/min): Drill Rigs razy mnożnik Orbital Ring."""
-    return int(round(DRILL_INCOME[base["drill"]] * RING_MULT[base["ring"]] * META_MULT["income"]))
-
-
-def vault_cap(base):
-    return income_rate(base) * VAULT_MINUTES[base["vault"]]
-
-
-def sale_mult(base):
-    return 1.0 + REFINERY_BONUS[base["refinery"]] + TRADE_BONUS * base["trade"]
-
-
-def short_cr(n):
-    return f"{n / 1_000_000:.1f}M".replace(".0M", "M") if n >= 1_000_000 else (f"{n // 1000}K" if n >= 1000 else str(n))
-
-
-def cost_text(cost):
-    return " ".join(f"{ORE[k]['name']} {n}" for k, n in cost.items())
-
-
-def module_info(key, lvl):
-    m = module_by_key(key)
-    nxt = ""
-    if lvl < len(m["costs"]):
-        cr = m.get("credits")
-        ore = " ".join(f"{n}{ORE[k]['name'][:3]}" for k, n in m["costs"][lvl].items())
-        nxt = "  NEXT: " + (f"{short_cr(cr[lvl])} CR, " if cr else "") + ore
-    if key == "drill":
-        eff = f"{DRILL_INCOME[lvl]} CR/MIN"
-    elif key == "refinery":
-        eff = f"ORE PRICE +{int(REFINERY_BONUS[lvl] * 100)}%"
-    elif key == "vault":
-        eff = f"HOLDS {VAULT_MINUTES[lvl]} MIN OF INCOME"
-    elif key == "scanner":
-        eff = f"MAP RANGE +{int(SCANNER_BONUS * 100 * lvl)}%"
-    elif key == "trade":
-        eff = f"ORE PRICE +{int(TRADE_BONUS * 100 * lvl)}% MORE"
-    elif key == "shield":
-        eff = f"+{lvl} SHIELD FOR ALL SHIPS"
-    elif key == "warp":
-        eff = "LOCKED" if lvl == 0 else f"[H] {lvl} WARP{'S' if lvl > 1 else ''} PER TRIP"
-    elif key == "engine":
-        eff = f"ENGINES +{int(ENGINE_BONUS * 100 * lvl)}%"
-    else:
-        eff = f"INCOME X{RING_MULT[lvl]}"
-    return eff + nxt
-
-
-def mix_text(mix):
-    return "+".join(ORE[k]["name"] for k in ORE_KINDS if mix.get(k, 0) > 0)
-
-
-def fire_rate_of(level):
-    return max(MIN_FIRE_RATE, round(0.4 - FIRE_STEP * level, 2))
-
-
-def engine_of(level):
-    return 2.0 + 0.5 * level
-
-
-def missile_of(level):
-    """(liczba rakiet w salwie, czas przeładowania w s) dla poziomu 1..6."""
-    level = max(1, min(len(MISSILE_N), level))
-    return MISSILE_N[level - 1], max(1.6, 4.0 - 0.4 * level)
-
-
-def upgrade_info(key, lvl, owned=()):
-    """Opis ulepszeń wspólnych dla wszystkich statków."""
-    if key == "cargo":
-        nxt = CARGO_CAP[min(lvl + 1, len(CARGO_CAP) - 1)]
-        return f"HOLDS {CARGO_CAP[lvl]} UNITS" + (f" (NEXT {nxt})" if lvl < len(CARGO_CAP) - 1 else "")
-    if key == "fire":
-        return f"{fire_rate_of(lvl):.2f}S BETWEEN SHOTS"
-    if key == "engine":
-        return f"THRUST {engine_of(lvl):.1f}"
-    if key == "double":
-        return "TWIN CANNONS: ACTIVE" if lvl else "FIRE TWO BULLETS AT ONCE"
-    if key == "shield":
-        n = max(lvl, 1)
-        return f"{n} HIT{'S' if n > 1 else ''} ABSORBED PER TRIP" + ("" if lvl else "  (NEXT)")
-    return ""
-
-
-def special_value(key, lvl):
-    """Krótki opis skutków ulepszenia na danym poziomie (do wyświetlenia 'teraz > następny')."""
-    if key == "repair":
-        return f"+{REPAIR_N[lvl]} SHIELD /{REPAIR_CD[lvl]:.0f}S" + (" +SAFE" if lvl >= 5 else "")
-    if key == "salvage":
-        return f"+{int(SALVAGE_BONUS * 100 * lvl)}% ROCK LOOT"
-    if key == "autorepair":
-        return "OFF" if lvl == 0 else f"1 SHIELD EVERY {AUTOREPAIR_SECS[lvl]:.0f}S"
-    if key == "dash":
-        return (f"CD {DASH_CD[lvl]:.1f}S" + (" RAM" if lvl >= 2 else "") + (" TRAIL" if lvl >= 4 else "")
-                + (" X2" if lvl >= 5 else "") + (" STRIKE" if lvl >= 6 else ""))
-    if key == "wave":
-        if lvl == 0:
-            return "LOCKED"
-        i = lvl - 1
-        return f"{WAVE_PULSES[i]}X R{WAVE_RADIUS[i]} DMG{WAVE_DAMAGE[i]} /{WAVE_COOLDOWN[i]:.0f}S"
-    if key == "guns":
-        return f"FIRE DELAY X{1.25 - GUNS_BONUS * lvl:.2f}"
-    if key == "overdrive":
-        return (f"{OVERDRIVE_SECS[lvl]:.0f}S /{OVERDRIVE_CD[lvl]:.0f}S CD" + (" KILLS" if lvl >= 3 else "")
-                + (" MSL" if lvl >= 4 else "") + (" SAFE" if lvl >= 5 else "") + (" X3" if lvl >= 6 else ""))
-    if key == "combo":
-        return "OFF" if lvl == 0 else f"MAX {COMBO_MAX[lvl]} STACKS, +5% EACH"
-    if key == "missile":
-        if lvl == 0:
-            return "LOCKED"
-        n, cd = missile_of(lvl)
-        return f"{n} MISSILE{'S' if n > 1 else ''} /{cd:.1f}S" + (" CLUSTER" if lvl >= CLUSTER_LEVEL else "")
-    if key == "turret":
-        if lvl == 0:
-            return "LOCKED"
-        i = lvl - 1
-        return (f"{1 / TURRET_COOLDOWN[i]:.1f}/S R{TURRET_RANGE[i]}" + (" +MSL" if lvl >= 4 else "")
-                + (" TWIN" if lvl >= 5 else "") + (" CLUSTER" if lvl >= 6 else ""))
-    if key == "reactive":
-        return f"BLAST R{REACTIVE_R[lvl]} DMG{REACTIVE_DMG[lvl]}" + (" PUSH" if lvl >= 4 else "") + (" REFUND" if lvl >= 5 else "")
-    if key == "scan":
-        drops = " 3X DROPS" if lvl >= 6 else (" 2X DROPS" if lvl >= 2 else "")
-        return (f"{SCAN_SECS[lvl]:.0f}S X{SCAN_MULTS[lvl]:.0f} /{SCAN_CD[lvl]:.0f}S" + drops
-                + (" LABELS" if lvl >= 4 else "") + (" MINE+" if lvl >= 5 else ""))
-    if key == "prospect":
-        return f"+{1 + lvl} ORE PER HIT"
-    if key == "optics":
-        return f"BULLET RANGE +{int(OPTICS_BONUS * 100 * lvl)}%"
-    if key == "beam":
-        return f"{BEAM_N[lvl]} BEAM{'S' if BEAM_N[lvl] > 1 else ''} POWER X{BEAM_POWER[lvl]:.1f} R+{int((BEAM_RANGE_MULT[lvl] - 1) * 100)}%"
-    if key == "silo":
-        return f"CARGO +{int(SILO_BONUS * 100 * lvl)}%"
-    if key == "refine":
-        return "OFF" if lvl == 0 else f"{int(REFINE_CHANCE[lvl] * 100)}% IRON BECOMES TITANIUM"
-    if key == "pulse":
-        return f"R{WELL_R[lvl]} {WELL_SECS[lvl]:.1f}S CRUSH{WELL_CRUSH[lvl]} /{WELL_CD[lvl]:.0f}S"
-    if key == "megahold":
-        return f"CARGO +{int(MEGAHOLD_BONUS * 100 * lvl)}%"
-    if key == "coils":
-        return f"MAGNET +{int(COILS_BONUS * 100 * lvl)}%"
-    return ""
-
-
-def special_info(key, lvl):
-    total = len(SPECIAL_ROWS[key]["costs"])
-    cur = special_value(key, lvl)
-    if lvl >= total:
-        return cur + " (MAX)"
-    nxt = special_value(key, lvl + 1)
-    txt = f"{cur} > {nxt}"
-    return txt if len(txt) <= 46 else f"NEXT: {nxt}"
-
-
-# --------------------
 # Gra
 # --------------------
 BASE_OBJ = SimpleNamespace(x=0.0, y=0.0, R=BASE_R)
 MISSILE_TRAIL = (YELLOW, ORANGE, RED, PLUM, DARK)
-
-
-# --------------------
-# Endgame: sektory (prestiż), relikty, kontrakty i artefakty
-# --------------------
-JUMP_MIN_RELICS = 3        # skok do nowego sektora jest możliwy, gdy da co najmniej tyle reliktów
-RELIC_DIVISOR = 50000      # relikty za skok = sqrt(zarobione kredyty / RELIC_DIVISOR)
-SECTOR_ORE_BONUS = 0.25    # każdy kolejny sektor: rudy droższe o 25%...
-SECTOR_HP_BONUS = 0.35     # ...ale asteroidy twardsze o 35%
-ARTIFACT_CHANCE = 0.10     # szansa na artefakt z kolosa (+2 pkt. proc. za każdy kolejny sektor)
-DUPLICATE_RELICS = 3       # znaleziony duplikat artefaktu zamienia się w relikty
-
-RELIC_PERKS = [  # stałe ulepszenia za relikty (zostają po skoku)
-    dict(key="legacy", name="PROSPECTOR LEGACY", costs=(1, 2, 4, 7, 12), info="ORE PRICE +15% PER LEVEL"),
-    dict(key="holds", name="BIG HOLDS", costs=(1, 2, 4, 7, 12), info="CARGO HOLD +15% PER LEVEL"),
-    dict(key="auto", name="AUTOMATION", costs=(2, 3, 5, 8, 13), info="PASSIVE INCOME + DRONE LOADS +25% PER LEVEL"),
-    dict(key="pilot", name="VETERAN PILOT", costs=(1, 3, 5, 8, 12), info="ENGINE + FIRE RATE +6% PER LEVEL"),
-    dict(key="start", name="HEAD START", costs=(2, 4, 7, 11, 16), info="START EVERY NEW SECTOR WITH CREDITS"),
-    dict(key="charter", name="FLEET CHARTER", costs=(10,), info="KEEP YOUR SHIPS AFTER A SECTOR JUMP"),
-]
-HEAD_START = (0, 5000, 20000, 80000, 300000, 1000000)
-
-ARTIFACTS = [  # (id, nazwa, zestaw, statystyka, wartość)
-    ("ion_coil", "ION COIL", "drive", "engine", 0.10),
-    ("gyro", "GYRO CORE", "drive", "turn", 0.20),
-    ("chrono", "CHRONO SHARD", "drive", "cooldown", 0.15),
-    ("lens", "STARFORGE LENS", "forge", "fire", 0.10),
-    ("aegis", "AEGIS PLATE", "forge", "shield", 1),
-    ("fang", "COLOSSUS FANG", "forge", "loot", 0.20),
-    ("pocket", "POCKET SPACE", "core", "cargo", 0.20),
-    ("bit", "CORE DRILL BIT", "core", "mine", 1),
-    ("hive", "HIVE MIND CHIP", "core", "drone", 0.25),
-    ("ledger", "GUILD LEDGER", "guild", "price", 0.10),
-    ("lodestone", "LODESTONE", "guild", "magnet", 0.40),
-    ("seal", "MERCHANT SEAL", "guild", "income", 0.30),
-]
-ARTIFACT_SETS = {  # komplet 3 artefaktów z zestawu daje dodatkowy bonus
-    "drive": ("PRECURSOR DRIVE", "warp", 1),
-    "forge": ("STARFORGE ARMS", "fire", 0.15),
-    "core": ("DEEP CORE", "cargo", 0.25),
-    "guild": ("TRADE GUILD", "price", 0.15),
-}
-STAT_LABEL = {"engine": "ENGINE", "turn": "TURN RATE", "cooldown": "ABILITY COOLDOWN", "fire": "FIRE RATE",
-              "shield": "SHIELD", "loot": "ASTEROID LOOT", "cargo": "CARGO HOLD", "mine": "ORE PER PLANET HIT",
-              "drone": "DRONE LOADS", "price": "ORE PRICE", "magnet": "MAGNET RANGE", "income": "PASSIVE INCOME",
-              "warp": "WARP HOME CHARGE"}
-META_MULT = {"income": 1.0}   # mnożnik dochodu pasywnego (odświeżany przez refresh_meta)
-
-
-def stat_text(stat, val):
-    if stat == "cooldown":
-        return f"{STAT_LABEL[stat]} -{val:.0%}"
-    if isinstance(val, int):
-        return f"+{val} {STAT_LABEL[stat]}"
-    return f"{STAT_LABEL[stat]} +{val:.0%}"
-
-
-def artifact_by_id(aid):
-    return next(a for a in ARTIFACTS if a[0] == aid)
-
-
-def meta_bonus(save, stat):
-    """Suma trwałych bonusów (artefakty, komplety zestawów, perki za relikty) dla danej statystyki."""
-    found = set(save["artifacts"])
-    v = sum(a[4] for a in ARTIFACTS if a[0] in found and a[3] == stat)
-    for set_key, (_, s_stat, s_val) in ARTIFACT_SETS.items():
-        if s_stat == stat and all(a[0] in found for a in ARTIFACTS if a[2] == set_key):
-            v += s_val
-    rl = save["relic_lv"]
-    v += {"price": 0.15 * rl.get("legacy", 0), "cargo": 0.15 * rl.get("holds", 0),
-          "income": 0.25 * rl.get("auto", 0), "drone": 0.25 * rl.get("auto", 0),
-          "engine": 0.06 * rl.get("pilot", 0), "fire": 0.06 * rl.get("pilot", 0)}.get(stat, 0)
-    return v
-
-
-def refresh_meta(save):
-    META_MULT["income"] = 1.0 + meta_bonus(save, "income")
-
-
-def sector_ore_mult(save):
-    return 1.0 + SECTOR_ORE_BONUS * (save["sector"] - 1)
-
-
-def sector_hp_mult(save):
-    return 1.0 + SECTOR_HP_BONUS * (save["sector"] - 1)
-
-
-def relics_for(earned):
-    return int(math.sqrt(max(0.0, earned) / RELIC_DIVISOR))
-
-
-# kontrakty: (typ, sekundy lotu na wykonanie); czas biegnie tylko w locie
-CONTRACT_TIME = {"deliver": 480, "planet": 480, "colossus": 600, "rocks": 360, "expedition": 420}
-
-
-def new_contract(save):
-    """Losowa oferta dopasowana do postępu gracza (znane surowce, ładownia, najdalszy lot)."""
-    seen = [k for k in ORE_KINDS if k in save["seen"]] or ["iron"]
-    cap = CARGO_CAP[save["levels"].get("cargo", 0)]
-    best = max(ORE[k]["value"] for k in seen)
-    wealth = max(cap, 60) * best * sector_ore_mult(save)   # mniej więcej wartość jednej pełnej ładowni
-    typ = random.choice(("deliver", "deliver", "planet", "colossus", "rocks", "expedition"))
-    c = dict(type=typ, kind=None, n=0, got=0, on=False, relics=1, art=random.random() < 0.25)
-    if typ in ("deliver", "planet"):
-        kind = random.choice(seen[-3:])   # raczej lepsze z poznanych surowców
-        c["kind"] = kind
-        c["n"] = max(10, int(round(cap * random.uniform(0.5, 1.1) / 10.0)) * 10)
-        c["reward"] = int(c["n"] * ORE[kind]["value"] * sector_ore_mult(save) * (3.0 if typ == "deliver" else 2.5))
-    elif typ == "colossus":
-        c["n"] = random.randint(1, 3)
-        c["reward"] = int(wealth * 1.5 * c["n"])
-        c["relics"] = 1 + (c["n"] >= 2)
-    elif typ == "rocks":
-        c["n"] = random.choice((40, 60, 80, 120))
-        c["reward"] = int(wealth * c["n"] / 40)
-    else:
-        c["n"] = int(max(PLANET_MIN_D * 1.4, save["far"] * 1.15) // 1000 * 1000)   # odległość od bazy (logika)
-        c["reward"] = int(wealth * 2.5)
-        c["relics"] = 2
-    c["reward"] = max(200, c["reward"])
-    c["left"] = c["time"] = CONTRACT_TIME[typ]
-    return c
-
-
-def contract_title(c):
-    if c["type"] == "deliver":
-        return f"DELIVER {c['n']} {ORE[c['kind']]['name']}"
-    if c["type"] == "planet":
-        return f"MINE {c['n']} {ORE[c['kind']]['name']} FROM PLANETS"
-    if c["type"] == "colossus":
-        return f"DESTROY {c['n']} COLOSS{'I' if c['n'] > 1 else 'US'}"
-    if c["type"] == "rocks":
-        return f"DESTROY {c['n']} ASTEROIDS"
-    return f"REACH {c['n'] // 100}KM FROM BASE"
-
-
-def contract_reward_text(c):
-    s = f"{short_cr(c['reward'])} CR + {c['relics']} RELIC{'S' if c['relics'] > 1 else ''}"
-    return s + (" + ARTIFACT" if c["art"] else "")
-
-
-def mmss(secs):
-    secs = max(0, int(secs))
-    return f"{secs // 60}:{secs % 60:02d}"
 
 
 def main():
@@ -1796,10 +139,10 @@ def main():
         nonlocal screen, world, veil
         ww, wh = pygame.display.get_surface().get_size()
         set_view(ww / max(1, wh))
-        if screen is None or screen.get_width() != CW:
-            screen = pygame.Surface((CW, CH)).convert()
-            world = pygame.Surface((VW, VH)).convert()
-            veil = pygame.Surface((VW, VH))
+        if screen is None or screen.get_width() != view.CW:
+            screen = pygame.Surface((view.CW, CH)).convert()
+            world = pygame.Surface((view.VW, view.VH)).convert()
+            veil = pygame.Surface((view.VW, view.VH))
             veil.fill(NAVY)
             veil.set_alpha(150)
 
@@ -1892,7 +235,7 @@ def main():
         surf = f.render(msg, False, color)
         x, y = pos
         if center:
-            x = (CW - surf.get_width()) // 2
+            x = (view.CW - surf.get_width()) // 2
         elif right:
             x = x - surf.get_width()
         elif mid:
@@ -2944,7 +1287,7 @@ def main():
         houses.append((round(math.cos(a_) * r_), round(math.sin(a_) * r_)))
 
     def visible(x, y, m=24):
-        return -m < x < VW + m and -m < y < VH + m
+        return -m < x < view.VW + m and -m < y < view.VH + m
 
     RING_PTS = [(math.cos(i * math.tau / 720), math.sin(i * math.tau / 720)) for i in range(720)]
 
@@ -3010,7 +1353,7 @@ def main():
         for i, (hx, hy) in enumerate(houses[:n_house]):
             if (i + phase) % 3:
                 x, y = cx + hx, cy + hy
-                if -4 < x < VW + 4 and -4 < y < VH + 4:
+                if -4 < x < view.VW + 4 and -4 < y < view.VH + 4:
                     screen.fill(YELLOW, (x + 1, y + 1, 1, 1))  # światło w oknie
         for key, r, n_slots, off in BUILD_LAYOUT:
             img = bld_img[key]
@@ -3075,7 +1418,7 @@ def main():
     def draw_base_planet(t_ms):
         cx, cy = sp(0, 0)
         lim = BASE_ART_R + 70
-        if abs(cx - VW // 2) < VW // 2 + lim and abs(cy - VH // 2) < VH // 2 + lim:
+        if abs(cx - view.VW // 2) < view.VW // 2 + lim and abs(cy - view.VH // 2) < view.VH // 2 + lim:
             screen.blit(base_img, base_img.get_rect(center=(cx, cy)))
             if save["base"]["ring"]:
                 draw_ring(cx, cy, save["base"]["ring"], t_ms)
@@ -3092,16 +1435,16 @@ def main():
                 for i in range(0, 720):
                     a_ = i * math.tau / 720
                     x_, y_ = round(cx + math.cos(a_) * r), round(cy + math.sin(a_) * r)
-                    if 0 <= x_ < VW and 0 <= y_ < VH:
+                    if 0 <= x_ < view.VW and 0 <= y_ < view.VH:
                         screen.fill(BLUE_D, (x_, y_, 1, 1))
 
     def draw_planet(pl):
         x, y = sp(pl.x, pl.y)
-        if not (abs(x - VW // 2) < VW // 2 + 130 and abs(y - VH // 2) < VH // 2 + 130):
+        if not (abs(x - view.VW // 2) < view.VW // 2 + 130 and abs(y - view.VH // 2) < view.VH // 2 + 130):
             return
         img = (dead_img if pl.depleted else planet_img)[(pl.kind, pl.variant)]
         if pl.flash > 0:
-            pl.flash -= DT_SCALE
+            pl.flash -= view.DT_SCALE
             img = silhouette(img, WHITE)
         screen.blit(img, img.get_rect(center=(x, y)))
 
@@ -3153,7 +1496,7 @@ def main():
         mm.fill(WHITE, (round(c + math.cos(rad) * 4), round(c + math.sin(rad) * 4), 1, 1))
         mm.blit(corner_mask, (0, 0))
         mm.set_colorkey((0, 0, 0))
-        x0, y0 = CW - MM_S - 4, 4
+        x0, y0 = view.CW - MM_S - 4, 4
         pygame.draw.circle(screen, NAVY, (x0 + c, y0 + c), c)
         screen.blit(mm, (x0, y0))
         pygame.draw.circle(screen, CYAN if scanning() else DARK, (x0 + c, y0 + c), c, 1)
@@ -3165,8 +1508,8 @@ def main():
         """Strzałka na krawędzi warstwy HUD w kierunku (dx, dy) od środka ekranu. Zwraca jej pozycję i wersor."""
         d = math.hypot(dx, dy) or 1.0
         ux, uy = dx / d, dy / d
-        t = min((CW / 2 - m) / max(abs(ux), 1e-6), (CH / 2 - m) / max(abs(uy), 1e-6))
-        cx, cy = CW / 2 + ux * t, CH / 2 + uy * t
+        t = min((view.CW / 2 - m) / max(abs(ux), 1e-6), (CH / 2 - m) / max(abs(uy), 1e-6))
+        cx, cy = view.CW / 2 + ux * t, CH / 2 + uy * t
         wx, wy = -uy * 4, ux * 4
         pts = [(cx + ux * 5, cy + uy * 5), (cx - ux * 3 + wx, cy - uy * 3 + wy), (cx - ux * 3 - wx, cy - uy * 3 - wy)]
         pygame.draw.polygon(screen, NAVY, [(x + 1, y + 1) for x, y in pts])
@@ -3176,8 +1519,8 @@ def main():
     def draw_base_arrow():
         """Strzałka przy krawędzi ekranu wskazująca bazę, gdy planeta-baza jest poza widokiem."""
         bx, by = sp(0, 0)
-        dx, dy = bx - VW // 2, by - VH // 2
-        if math.hypot(dx, dy) - BASE_ART_R < VH // 2:  # krawędź planety jest w kadrze
+        dx, dy = bx - view.VW // 2, by - view.VH // 2
+        if math.hypot(dx, dy) - BASE_ART_R < view.VH // 2:  # krawędź planety jest w kadrze
             return
         edge_arrow(dx, dy, CYAN)
 
@@ -3188,10 +1531,10 @@ def main():
                       key=lambda q: (q.x - p.x) ** 2 + (q.y - p.y) ** 2)[:6]
         for pl in cand:
             x, y = sp(pl.x, pl.y)
-            if abs(x - VW // 2) < VW // 2 + 100 and abs(y - VH // 2) < VH // 2 + 100:
+            if abs(x - view.VW // 2) < view.VW // 2 + 100 and abs(y - view.VH // 2) < view.VH // 2 + 100:
                 continue
             col = ORE[pl.kind]["color"]
-            cx, cy, ux, uy = edge_arrow(x - VW // 2, y - VH // 2, col, m=20)
+            cx, cy, ux, uy = edge_arrow(x - view.VW // 2, y - view.VH // 2, col, m=20)
             km = int(math.hypot(pl.x - p.x, pl.y - p.y) // 100)
             text(str(km), 8, col, (round(cx - ux * 15), round(cy - uy * 9)), mid=True)
 
@@ -3255,7 +1598,7 @@ def main():
                 yy += 12
         if S.combo > 1:
             text(f"COMBO X{S.combo}", 8, ORANGE, (6, yy))
-        text("ESC - PAUSE", 8, GREY, (CW - 6, CH - 14), right=True)
+        text("ESC - PAUSE", 8, GREY, (view.CW - 6, CH - 14), right=True)
         bars = []
         if lv["wave"] and S.ship["id"] == "interceptor":  # Shockwave jest wyłączny dla Interceptora
             bars.append(("E SHOCKWAVE", S.wave_cd, WAVE_COOLDOWN[lv["wave"] - 1], None))
@@ -3288,7 +1631,7 @@ def main():
         if S.toast[2] > 0:
             if S.toast[2] > 30 or (int(S.toast[2]) // 3) % 2 == 0:
                 text(S.toast[0], 8, S.toast[1], (0, 104), center=True)
-            S.toast[2] -= DT_SCALE
+            S.toast[2] -= view.DT_SCALE
 
     # ---------- krok symulacji lotu ----------
     def flight_step():
@@ -3301,13 +1644,13 @@ def main():
         od_on = S.ship["ability"] == "overdrive" and S.ab_t > 0
         S.missile_cd = max(0.0, S.missile_cd - dt * (2.0 if (od_on and lv["overdrive"] >= 4) else 1.0))
         if S.combo_t > 0:  # Kill Combo gaśnie po kilku sekundach bez zabójstwa
-            S.combo_t -= DT_SCALE
+            S.combo_t -= view.DT_SCALE
             if S.combo_t <= 0:
                 S.combo_t, S.combo = 0, 0
         S.wave_cd = max(0.0, S.wave_cd - dt)
         S.dash_cd = max(0.0, S.dash_cd - dt)
         if S.ab_t > 0:
-            S.ab_t -= DT_SCALE
+            S.ab_t -= view.DT_SCALE
             if S.ship["ability"] == "scan" and S.ab_t > 30:   # okresowe pingi skanera (co ~1.67s), dopóki > 0.5s zostało
                 S.scan_ping_cd -= dt
                 if S.scan_ping_cd <= 0:
@@ -3320,7 +1663,7 @@ def main():
                                               math.cos(a_) * 2.5, math.sin(a_) * 2.5, 14, (YELLOW, ORANGE, RED, PLUM)))
         if S.wave_queue:  # kolejne uderzenia Shockwave (poziomy 4-5)
             for q in S.wave_queue:
-                q[0] -= DT_SCALE
+                q[0] -= view.DT_SCALE
                 if q[0] <= 0 and S.phase == "fly":
                     waves.append(Shockwave(p, WAVE_RADIUS[q[1]], WAVE_DAMAGE[q[1]], (CYAN, WHITE), "electric"))
                     S.shake = max(S.shake, 8)
@@ -3328,7 +1671,7 @@ def main():
         if S.well_t > 0 and S.phase == "fly":  # Gravity Well: ciągnie ładunek i asteroidy, miażdży te przy statku
             wi = save["levels"]["pulse"]
             R_, crush = WELL_R[wi], WELL_CRUSH[wi]
-            S.well_t -= DT_SCALE
+            S.well_t -= view.DT_SCALE
             S.phase_t = max(S.phase_t, 3)
             for a in entities:
                 if a.name != "asteroid" or not a.life:
@@ -3337,8 +1680,8 @@ def main():
                 d = math.hypot(dxp, dyp) or 1.0
                 if d < R_:
                     spd = 3.0 + 9.0 * (1 - d / R_)
-                    a.dx += (dxp / d * spd - a.dx) * min(1.0, 0.14 * DT_SCALE)
-                    a.dy += (dyp / d * spd - a.dy) * min(1.0, 0.14 * DT_SCALE)
+                    a.dx += (dxp / d * spd - a.dx) * min(1.0, 0.14 * view.DT_SCALE)
+                    a.dy += (dyp / d * spd - a.dy) * min(1.0, 0.14 * view.DT_SCALE)
                     if d < p.R + a.R + 70 and a.crush_cd <= 0:
                         a.crush_cd = 12
                         damage_asteroid(a, crush)
@@ -3366,9 +1709,9 @@ def main():
                 set_toast("KNOCKBACK!", LIME, 80)
         p.boost = 1.35 if (S.ship["ability"] == "overdrive" and S.ab_t > 0) else 1.0
         if S.invuln > 0:
-            S.invuln -= DT_SCALE
+            S.invuln -= view.DT_SCALE
         if S.phase_t > 0:
-            S.phase_t -= DT_SCALE
+            S.phase_t -= view.DT_SCALE
         fly = S.phase == "fly"
         S.turn_dir = 0
         p.reverse = False
@@ -3403,7 +1746,7 @@ def main():
         if fly and tl:
             S.turret_cd = max(0.0, S.turret_cd - dt)
             if S.turret_flash > 0:
-                S.turret_flash -= DT_SCALE
+                S.turret_flash -= view.DT_SCALE
             S.turret_msl_cd = max(0.0, S.turret_msl_cd - dt)
             best, bd = None, TURRET_RANGE[tl - 1] ** 2
             for a in entities:
@@ -3459,7 +1802,7 @@ def main():
                 S.dust_cd = 3.0 / FPS
                 rad = p.angle * DEGTORAD
                 burst(p.x - math.cos(rad) * 12, p.y - math.sin(rad) * 12, 2, (WHITE, GREY, DARK), speed=1.5, life=16)
-            S.t += DT_SCALE
+            S.t += view.DT_SCALE
             if S.t >= LAND_FRAMES:  # lądowanie: obłok pyłu i rozładunek
                 burst(tx, ty, 26, (WHITE, GREY, DARK), speed=3.5, life=26)
                 fx.append(FxRing(tx, ty, 20, 260, 20, (WHITE, GREY), 2))
@@ -3484,7 +1827,7 @@ def main():
                 S.tally = {k: 0.0 for k in ORE_KINDS}
         elif S.phase == "unload":
             tx, ty = pad_pos(S.pad)
-            S.t += DT_SCALE
+            S.t += view.DT_SCALE
             S.unload_cd -= dt
             if S.unload_q and S.unload_cd <= 0:  # rozładunek zawsze trwa najwyżej ok. 1,5 s, nawet przy ładowni 2500
                 S.unload_cd = 3.0 / FPS
@@ -3512,7 +1855,7 @@ def main():
                     S.tally[kind] = 0.0
                     S.div_t[kind] = 0
             if not S.unload_q:
-                S.idle_t += DT_SCALE
+                S.idle_t += view.DT_SCALE
                 if not S.vault_done:  # skarbiec z pasywnym dochodem opróżnia się raz, przy lądowaniu
                     S.vault_done = True
                     got = int(save["vault"])
@@ -3552,13 +1895,13 @@ def main():
                 S.dust_cd = 3.0 / FPS
                 rad = p.angle * DEGTORAD
                 burst(p.x - math.cos(rad) * 12, p.y - math.sin(rad) * 12, 2, (YELLOW, ORANGE, RED), speed=1.5, life=14)
-            S.t += DT_SCALE
+            S.t += view.DT_SCALE
             if S.t >= LAUNCH_FRAMES:
                 p.scale = 1.0
                 p.dx, p.dy = math.cos(a) * 5, math.sin(a) * 5
                 S.phase = "fly"
         elif S.phase == "dead":
-            S.t += DT_SCALE
+            S.t += view.DT_SCALE
             if S.t > 100:
                 S.state = "base"
                 S.sel = 0
@@ -3572,7 +1915,7 @@ def main():
                 n_rocks = sum(1 for e in entities if e.name == "asteroid")
                 if n_rocks < min(90, 20 + 7 * tier_p) and random.random() < 0.25:
                     ang = random.uniform(0, math.tau)
-                    vd = math.hypot(VW, VH) / K / 2   # połowa przekątnej widoku (logika)
+                    vd = math.hypot(view.VW, view.VH) / K / 2   # połowa przekątnej widoku (logika)
                     dist = random.uniform(vd + 150, vd + 500)   # tuż za krawędzią widoku
                     x, y = p.x + math.cos(ang) * dist, p.y + math.sin(ang) * dist
                     tier_s = zone_tier(math.hypot(x, y))
@@ -3582,7 +1925,7 @@ def main():
                         entities.append(new_rock(x, y, random.randrange(360), rt, gold, min(HP_MAX, 1 + tier_s),
                                                  pick_ore(math.hypot(x, y), gold)))
             # skupiska: wokół niektórych planet trzyma się gęsty pierścień asteroid (w tym kolosów)
-            vdf = math.hypot(VW, VH) / K / 2
+            vdf = math.hypot(view.VW, view.VH) / K / 2
             for pl in WORLD.near(p.x, p.y):
                 if pl.field_r <= 0:
                     continue
@@ -3610,16 +1953,16 @@ def main():
             if e.name == "asteroid":
                 dd = math.hypot(e.x - p.x, e.y - p.y)
                 d0 = math.hypot(e.x, e.y) or 1.0
-                vd = math.hypot(VW, VH) / K / 2
+                vd = math.hypot(view.VW, view.VH) / K / 2
                 if e.field is not None:  # asteroidy ze skupiska wolno krążą wokół swojej planety
                     fdx, fdy = e.field.x - e.x, e.field.y - e.y
                     fd = math.hypot(fdx, fdy) or 1.0
                     if fd > e.field.field_r:
-                        e.dx += fdx / fd * 0.05 * DT_SCALE
-                        e.dy += fdy / fd * 0.05 * DT_SCALE
+                        e.dx += fdx / fd * 0.05 * view.DT_SCALE
+                        e.dy += fdy / fd * 0.05 * view.DT_SCALE
                     elif fd < e.field.R + 200:
-                        e.dx -= fdx / fd * 0.05 * DT_SCALE
-                        e.dy -= fdy / fd * 0.05 * DT_SCALE
+                        e.dx -= fdx / fd * 0.05 * view.DT_SCALE
+                        e.dy -= fdy / fd * 0.05 * view.DT_SCALE
                     sp2 = math.hypot(e.dx, e.dy)
                     if sp2 > 2.2 and e.knock <= 0:
                         e.dx, e.dy = e.dx / sp2 * 2.2, e.dy / sp2 * 2.2
@@ -3629,8 +1972,8 @@ def main():
                     if dd > vd + 100:
                         e.life = False
                     else:
-                        e.dx += e.x / d0 * 0.2 * DT_SCALE
-                        e.dy += e.y / d0 * 0.2 * DT_SCALE
+                        e.dx += e.x / d0 * 0.2 * view.DT_SCALE
+                        e.dy += e.y / d0 * 0.2 * view.DT_SCALE
 
         # ---- kolizje ----
         planets = WORLD.near(p.x, p.y)   # fizyka i rysowanie: tylko okolica
@@ -3743,11 +2086,11 @@ def main():
                     convert_asteroid(bt)
                     S.beam_targets.remove(bt)
                 else:
-                    bt.pull_t += DT_SCALE
+                    bt.pull_t += view.DT_SCALE
                     spd = min(9.0 * BEAM_POWER[bl], (2.5 + bt.pull_t * 0.12) * BEAM_POWER[bl]) * (0.75 if bt.gold else 1.0)
                     if bt.tier == "colossus":
                         spd *= 0.55
-                    lerp = min(1.0, 0.2 * DT_SCALE)
+                    lerp = min(1.0, 0.2 * view.DT_SCALE)
                     bt.dx += (dxp / d * spd - bt.dx) * lerp
                     bt.dy += (dyp / d * spd - bt.dy) * lerp
 
@@ -3765,11 +2108,11 @@ def main():
                 continue
             e.update()
             e.anim.update()
-            if e.name == "asteroid" and e.gold and random.random() < 0.12 * DT_SCALE and on_screen(e.x, e.y, 50):
+            if e.name == "asteroid" and e.gold and random.random() < 0.12 * view.DT_SCALE and on_screen(e.x, e.y, 50):
                 particles.append(Sparkle(e.x + random.uniform(-e.R, e.R), e.y + random.uniform(-e.R, e.R)))
-            if e.name == "bullet" and e.spark and random.random() < DT_SCALE:
+            if e.name == "bullet" and e.spark and random.random() < view.DT_SCALE:
                 particles.append(Particle(e.x, e.y, random.uniform(-0.6, 0.6), random.uniform(-0.6, 0.6), 10, (YELLOW, ORANGE, RED)))
-            if e.name == "missile" and random.random() < DT_SCALE:
+            if e.name == "missile" and random.random() < view.DT_SCALE:
                 rad = e.angle * DEGTORAD
                 particles.append(Particle(e.x - math.cos(rad) * 14 + random.uniform(-3, 3),
                                           e.y - math.sin(rad) * 14 + random.uniform(-3, 3),
@@ -3806,7 +2149,7 @@ def main():
                     if o.amount <= 0:
                         o.life = 0
                     burst(p.x, p.y, 3, (WHITE, ORE[o.kind]["color"]), speed=2.0, life=10)
-        S.pick_t += DT_SCALE
+        S.pick_t += view.DT_SCALE
         if S.pick_t >= 20:  # zbiorcze napisy "+N" zamiast jednego na bryłkę
             for k in ORE_KINDS:
                 if S.pick[k]:
@@ -3817,14 +2160,14 @@ def main():
             emit_exhaust(p)
         if p.dash_t > 0 and alive:
             ghosts.append(Ghost(p.x, p.y, rotated(p.anim.image, p.angle + 90)))
-        if alive and S.ab_t > 0 and S.ship["ability"] == "overdrive" and random.random() < DT_SCALE:  # ognista smuga
+        if alive and S.ab_t > 0 and S.ship["ability"] == "overdrive" and random.random() < view.DT_SCALE:  # ognista smuga
             rad = p.angle * DEGTORAD
             particles.append(Particle(p.x - math.cos(rad) * 18 + random.uniform(-6, 6),
                                       p.y - math.sin(rad) * 18 + random.uniform(-6, 6),
                                       random.uniform(-0.6, 0.6), random.uniform(-0.6, 0.6), 18, (YELLOW, ORANGE, RED, PLUM)))
         for d in S.drones:
             x, y, f = drone_pos(d)
-            if on_screen(x, y, 60) and random.random() < 0.35 * DT_SCALE:
+            if on_screen(x, y, 60) and random.random() < 0.35 * view.DT_SCALE:
                 rad = d["ang"] + (0.0 if f < 0.5 else math.pi)
                 particles.append(Particle(x - math.cos(rad) * 22, y - math.sin(rad) * 22,
                                           random.uniform(-0.3, 0.3), random.uniform(-0.3, 0.3), 14, (YELLOW, ORANGE, PLUM, DARK)))
@@ -3832,8 +2175,8 @@ def main():
             for o in grp:
                 o.update()
         for f in floats:
-            f[1] -= 1.6 * DT_SCALE
-            f[4] -= DT_SCALE
+            f[1] -= 1.6 * view.DT_SCALE
+            f[4] -= view.DT_SCALE
         for e in entities:
             if e.name == "bullet" and e.spark and not e.life:
                 burst(e.x, e.y, 5, (WHITE, YELLOW, ORANGE), speed=2.5, life=12)   # bomblet gaśnie mini-wybuchem
@@ -3846,7 +2189,7 @@ def main():
         waves[:] = [w for w in waves if w.life]
         fx[:] = [f for f in fx if f.life > 0]
         if S.flash > 0:
-            S.flash -= DT_SCALE
+            S.flash -= view.DT_SCALE
         floats[:] = [f for f in floats if f[4] > 0]
 
         # ---- kamera: podąża za statkiem z lekkim wyprzedzeniem ----
@@ -3854,7 +2197,7 @@ def main():
             tx, ty = p.x + p.dx * 6, p.y + p.dy * 6
         else:
             tx, ty = p.x, p.y
-        follow = 1 - 0.88 ** DT_SCALE   # to samo tempo kamery przy każdym limicie FPS
+        follow = 1 - 0.88 ** view.DT_SCALE   # to samo tempo kamery przy każdym limicie FPS
         CAM[0] += (tx - CAM[0]) * follow
         CAM[1] += (ty - CAM[1]) * follow
 
@@ -3953,7 +2296,7 @@ def main():
         cp, sp_ = math.cos(phi), math.sin(phi)
         back = math.radians(p.angle + 180)
         for lx, ly in fx_pts[sid]["main"]:
-            if random.random() < 0.55 * min(pw, 1.5) * DT_SCALE:
+            if random.random() < 0.55 * min(pw, 1.5) * view.DT_SCALE:
                 ox = (lx * cp - (ly + SHIP_FX[sid]["L"] * 0.7) * sp_) * p.scale / K
                 oy = (lx * sp_ + (ly + SHIP_FX[sid]["L"] * 0.7) * cp) * p.scale / K
                 spd = random.uniform(1.5, 3.8) * (1 + max(0, pw - 1) * 0.6)
@@ -4092,8 +2435,8 @@ def main():
         screen.set_colorkey(KEY)   # subsurface dziedziczy colorkey, więc get_bounding_rect pomija puste piksele
         T = 64
         for ty in range(0, CH, T):
-            for tx in range(0, CW, T):
-                br = screen.subsurface((tx, ty, min(T, CW - tx), min(T, CH - ty))).get_bounding_rect()
+            for tx in range(0, view.CW, T):
+                br = screen.subsurface((tx, ty, min(T, view.CW - tx), min(T, CH - ty))).get_bounding_rect()
                 if not br.w:
                     continue
                 br.move_ip(tx, ty)
@@ -4178,7 +2521,7 @@ def main():
         if S.shake > 0:  # drżenie dotyczy świata, HUD stoi w miejscu; słabnie razem z S.shake
             amp = max(1, min(9, int(1 + S.shake * 0.45)))
             world.scroll(random.randint(-amp, amp), random.randint(-amp, amp))
-            S.shake -= DT_SCALE
+            S.shake -= view.DT_SCALE
         screen = hud_layer  # dalej: warstwa HUD (przezroczysta)
         screen.fill(KEY)
         for f in floats:  # napisy z punktami/surowcami: pozycja ze świata przeliczona na HUD
@@ -4203,7 +2546,7 @@ def main():
         CAM[0] += 0.6
         draw_space()
         cy = CH + BASE_ART_R - (26 if low else 58)  # tylko wierzch planety wyłania się zza dołu ekranu
-        screen.blit(base_img, base_img.get_rect(center=(CW // 2, cy)))
+        screen.blit(base_img, base_img.get_rect(center=(view.CW // 2, cy)))
 
     fill_contracts()
 
@@ -4222,12 +2565,11 @@ def main():
     running = True
     real_dt = 1.0 / FPS
     while running:
-        global DT_SCALE
         raw_ms = clock.tick(render_fps)
         if raw_ms is None:   # niektóre nakładki testowe/mocki zwracają None zamiast ms
             raw_ms = 1000.0 / FPS
         real_dt = min(raw_ms / 1000.0, DT_SCALE_CAP / FPS)   # ochrona przed skokiem po zacięciu (np. przeciąganie okna)
-        DT_SCALE = real_dt * FPS   # przy 60 FPS = 1.0 (identycznie jak dawniej); przy 120 = 0.5, przy 240 = 0.25
+        view.DT_SCALE = real_dt * FPS   # przy 60 FPS = 1.0 (identycznie jak dawniej); przy 120 = 0.5, przy 240 = 0.25
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -4455,9 +2797,9 @@ def main():
 
         elif S.state == "hangar":
             draw_base_backdrop(low=True)
-            mx = (CW - 480) // 2  # układ ekranu jest projektowany na 480 px, na szerszym ekranie wyśrodkowany
+            mx = (view.CW - 480) // 2  # układ ekranu jest projektowany na 480 px, na szerszym ekranie wyśrodkowany
             text("HANGAR", 24, YELLOW, (0, 14), center=True, shadow=RED)
-            text(f"CREDITS: {save['credits']}", 8, CYAN, (CW - 6, 6), right=True)
+            text(f"CREDITS: {save['credits']}", 8, CYAN, (view.CW - 6, 6), right=True)
             sh = SHIPS[S.hangar_sel]
             owned = sh["id"] in save["owned"]
             equipped = save["ship"] == sh["id"]
@@ -4494,17 +2836,17 @@ def main():
                 text(f"ENTER TO BUY: {sh['cost']} CR", 8, YELLOW if save["credits"] >= sh["cost"] else RED, (mx + 244, 224))
             if S.notice[2] > 0:
                 text(S.notice[0], 8, S.notice[1], (0, 258), center=True)
-                S.notice[2] -= DT_SCALE
+                S.notice[2] -= view.DT_SCALE
             text("LEFT/RIGHT CHOOSE  ENTER SELECT  ESC BACK", 8, GREY, (0, CH - 16), center=True)
 
         elif S.state == "specials":
             draw_base_backdrop(low=True)
             text("SPECIALS", 24, YELLOW, (0, 4), center=True, shadow=RED)
-            text(f"CREDITS: {save['credits']}", 8, CYAN, (CW - 6, 6), right=True)
+            text(f"CREDITS: {save['credits']}", 8, CYAN, (view.CW - 6, 6), right=True)
             sh = SHIPS[S.spec_ship]
             owned = sh["id"] in save["owned"]
             keys = SPECIALS[sh["id"]]
-            panel((16, 34, CW - 32, 58))
+            panel((16, 34, view.CW - 32, 58))
             t = pygame.time.get_ticks()
             img = ship_frames[sh["id"]][0]
             img = pygame.transform.scale(img, (img.get_width() * 2, img.get_height() * 2))
@@ -4519,13 +2861,13 @@ def main():
             text(sh["perk"][0], 8, WHITE, (tx_, 60), shadow=None)
             text(sh["perk"][1], 8, GREY, (tx_, 72), shadow=None)
             for j in range(len(SHIPS)):
-                pygame.draw.rect(screen, YELLOW if j == S.spec_ship else DARK, (CW - 24 - (len(SHIPS) - j) * 12, 42, 8, 4))
+                pygame.draw.rect(screen, YELLOW if j == S.spec_ship else DARK, (view.CW - 24 - (len(SHIPS) - j) * 12, 42, 8, 4))
             if (t // 400) % 2 == 0:
                 text("<", 16, WHITE, (4, 54))
-                text(">", 16, WHITE, (CW - 20, 54))
+                text(">", 16, WHITE, (view.CW - 20, 54))
             rows_n = len(keys)
             rh = 36
-            panel((16, 98, CW - 32, rows_n * rh + 6))
+            panel((16, 98, view.CW - 32, rows_n * rh + 6))
             for i, key in enumerate(keys):
                 r = SPECIAL_ROWS[key]
                 y = 101 + i * rh
@@ -4534,20 +2876,20 @@ def main():
                 maxed = lvl >= total
                 sel = i == S.spec_sel
                 if sel:
-                    pygame.draw.rect(screen, DARK, (20, y, CW - 40, rh - 2))
-                    pygame.draw.rect(screen, YELLOW, (20, y, CW - 40, rh - 2), 1)
+                    pygame.draw.rect(screen, DARK, (20, y, view.CW - 40, rh - 2))
+                    pygame.draw.rect(screen, YELLOW, (20, y, view.CW - 40, rh - 2), 1)
                 text(r["name"], 8, YELLOW if sel else WHITE, (28, y + 4), shadow=None)
                 pips(176, y + 4, lvl, total, LIME if maxed else YELLOW, NAVY if sel else DARK)
                 if maxed:
-                    text("MAX", 8, LIME, (CW - 28, y + 4), right=True, shadow=None)
+                    text("MAX", 8, LIME, (view.CW - 28, y + 4), right=True, shadow=None)
                 else:
                     cost = r["costs"][lvl]
-                    text(f"COST {cost}", 8, YELLOW if save["credits"] >= cost else RED, (CW - 28, y + 4),
+                    text(f"COST {cost}", 8, YELLOW if save["credits"] >= cost else RED, (view.CW - 28, y + 4),
                          right=True, shadow=None)
                 text(special_info(key, lvl), 8, GREY, (28, y + 18), shadow=None)
             if S.notice[2] > 0:
                 text(S.notice[0], 8, S.notice[1], (0, 98 + rows_n * rh + 12), center=True)
-                S.notice[2] -= DT_SCALE
+                S.notice[2] -= view.DT_SCALE
             text("LEFT/RIGHT SHIP  UP/DOWN SELECT  ENTER BUY", 8, GREY, (0, CH - 14), center=True)
 
         elif S.state == "contracts":
@@ -4558,12 +2900,12 @@ def main():
             for i, c in enumerate(save["contracts"]):
                 y = 46 + i * (rh + 4)
                 sel = i == S.ct_sel
-                panel((16, y, CW - 32, rh))
+                panel((16, y, view.CW - 32, rh))
                 if sel:
-                    pygame.draw.rect(screen, YELLOW, (16, y, CW - 32, rh), 1)
+                    pygame.draw.rect(screen, YELLOW, (16, y, view.CW - 32, rh), 1)
                 text(contract_title(c), 8, YELLOW if sel else WHITE, (26, y + 6), shadow=None)
                 if c["on"]:
-                    text("ACTIVE", 8, LIME, (CW - 26, y + 6), right=True, shadow=None)
+                    text("ACTIVE", 8, LIME, (view.CW - 26, y + 6), right=True, shadow=None)
                 text("REWARD " + contract_reward_text(c), 8, (210, 184, 255) if c["art"] else CYAN, (26, y + 20),
                      shadow=None)
                 if c["on"]:
@@ -4571,16 +2913,16 @@ def main():
                     prog = f"BEST {c['got'] // 100}/{c['n'] // 100}KM" if exp else f"PROGRESS {c['got']}/{c['n']}"
                     text(f"{prog}   TIME LEFT {mmss(c['left'])}", 8, RED if c["left"] < 60 else WHITE, (26, y + 34),
                          shadow=None)
-                    bw = CW - 52
+                    bw = view.CW - 52
                     pygame.draw.rect(screen, DARK, (26, y + 47, bw, 4))
                     pygame.draw.rect(screen, LIME, (26, y + 47, int(bw * min(1.0, c["got"] / max(1, c["n"]))), 4))
                 else:
                     text(f"TIME LIMIT {mmss(c['time'])} OF FLIGHT", 8, GREY, (26, y + 34), shadow=None)
                     if sel:
-                        text("ENTER - ACCEPT", 8, YELLOW, (CW - 26, y + 34), right=True, shadow=None)
+                        text("ENTER - ACCEPT", 8, YELLOW, (view.CW - 26, y + 34), right=True, shadow=None)
             if S.notice[2] > 0:
                 text(S.notice[0], 8, S.notice[1], (0, 236), center=True)
-                S.notice[2] -= DT_SCALE
+                S.notice[2] -= view.DT_SCALE
             text("TIMERS RUN ONLY WHILE YOU FLY. ORE STILL SELLS NORMALLY.", 8, GREY, (0, 252), center=True)
             text("UP/DOWN SELECT  ENTER ACCEPT/CANCEL  ESC BACK", 8, GREY, (0, CH - 14), center=True)
 
@@ -4589,21 +2931,21 @@ def main():
             text("FRONTIER", 24, YELLOW, (0, 4), center=True, shadow=RED)
             text(f"SECTOR {save['sector']}   RELICS {save['relics']}", 8, (210, 184, 255), (0, 30), center=True)
             for j, tab in enumerate(("RELICS", "ARTIFACTS")):
-                tx_ = CW // 2 + (j * 2 - 1) * 60
+                tx_ = view.CW // 2 + (j * 2 - 1) * 60
                 on = j == S.fr_tab
                 text(f"[{tab}]" if on else tab, 8, YELLOW if on else GREY, (tx_, 42), mid=True)
             if S.jump_confirm > 0:
-                S.jump_confirm -= DT_SCALE
+                S.jump_confirm -= view.DT_SCALE
             if S.fr_tab == 0:
                 rows = len(RELIC_PERKS) + 1
                 rh = 25
-                panel((16, 54, CW - 32, rows * rh + 6))
+                panel((16, 54, view.CW - 32, rows * rh + 6))
                 for i in range(rows):
                     y = 57 + i * rh
                     sel = i == S.fr_sel
                     if sel:
-                        pygame.draw.rect(screen, DARK, (20, y, CW - 40, rh - 2))
-                        pygame.draw.rect(screen, YELLOW, (20, y, CW - 40, rh - 2), 1)
+                        pygame.draw.rect(screen, DARK, (20, y, view.CW - 40, rh - 2))
+                        pygame.draw.rect(screen, YELLOW, (20, y, view.CW - 40, rh - 2), 1)
                     if i < len(RELIC_PERKS):
                         pk = RELIC_PERKS[i]
                         lvl = save["relic_lv"].get(pk["key"], 0)
@@ -4612,11 +2954,11 @@ def main():
                         text(pk["name"], 8, YELLOW if sel else WHITE, (28, y + 3), shadow=None)
                         pips(176, y + 3, lvl, total, LIME if maxed else (210, 184, 255), NAVY if sel else DARK)
                         if maxed:
-                            text("MAX", 8, LIME, (CW - 28, y + 3), right=True, shadow=None)
+                            text("MAX", 8, LIME, (view.CW - 28, y + 3), right=True, shadow=None)
                         else:
                             cost = pk["costs"][lvl]
                             text(f"{cost} RELIC{'S' if cost > 1 else ''}", 8,
-                                 (210, 184, 255) if save["relics"] >= cost else RED, (CW - 28, y + 3), right=True, shadow=None)
+                                 (210, 184, 255) if save["relics"] >= cost else RED, (view.CW - 28, y + 3), right=True, shadow=None)
                         info = pk["info"]
                         if pk["key"] == "start":
                             info += f" ({short_cr(HEAD_START[min(lvl + (0 if maxed else 1), total)])})"
@@ -4625,7 +2967,7 @@ def main():
                         gain = relics_for(save["earned"])
                         ok = gain >= JUMP_MIN_RELICS
                         text("SECTOR JUMP", 8, YELLOW if sel else (210, 184, 255), (28, y + 3), shadow=None)
-                        text(f"+{gain} RELICS", 8, LIME if ok else RED, (CW - 28, y + 3), right=True, shadow=None)
+                        text(f"+{gain} RELICS", 8, LIME if ok else RED, (view.CW - 28, y + 3), right=True, shadow=None)
                         if ok:
                             info = "NEW WORLD. KEEPS RELICS, PERKS, ARTIFACTS"
                         else:
@@ -4639,7 +2981,7 @@ def main():
                      8, GREY, (0, ny), center=True)
                 if S.notice[2] > 0:
                     text(S.notice[0], 8, S.notice[1], (0, ny + 14), center=True)
-                    S.notice[2] -= DT_SCALE
+                    S.notice[2] -= view.DT_SCALE
                 text("LEFT/RIGHT TAB  UP/DOWN SELECT  ENTER BUY  ESC BACK", 8, GREY, (0, CH - 14), center=True)
             else:
                 found = set(save["artifacts"])
@@ -4649,13 +2991,13 @@ def main():
                     have = sum(1 for a in members if a[0] in found)
                     full = have == len(members)
                     text(f"{set_name} {have}/{len(members)}", 8, LIME if full else YELLOW, (24, y))
-                    text("SET: " + stat_text(s_stat, s_val), 8, LIME if full else GREY, (CW - 24, y), right=True)
+                    text("SET: " + stat_text(s_stat, s_val), 8, LIME if full else GREY, (view.CW - 24, y), right=True)
                     y += 12
                     for a in members:
                         got = a[0] in found
                         screen.fill((210, 184, 255) if got else DARK, (32, y + 2, 5, 5))
                         text(a[1] if got else "? ? ?", 8, WHITE if got else GREY, (44, y), shadow=None)
-                        text(stat_text(a[3], a[4]) if got else "UNKNOWN", 8, CYAN if got else DARK, (CW - 32, y),
+                        text(stat_text(a[3], a[4]) if got else "UNKNOWN", 8, CYAN if got else DARK, (view.CW - 32, y),
                              right=True, shadow=None)
                         y += 11
                     y += 5
@@ -4670,7 +3012,7 @@ def main():
             text(f"CREDITS: {save['credits']}", 16, CYAN, (0, 30), center=True)
             rows = len(UPGRADES)
             rh = 34
-            panel((16, 50, CW - 32, rows * rh + 6))
+            panel((16, 50, view.CW - 32, rows * rh + 6))
             for i, u in enumerate(UPGRADES):
                 y = 53 + i * rh
                 lvl = save["levels"][u["key"]]
@@ -4678,20 +3020,20 @@ def main():
                 maxed = lvl >= total
                 sel = i == S.up_sel
                 if sel:
-                    pygame.draw.rect(screen, DARK, (20, y, CW - 40, rh - 2))
-                    pygame.draw.rect(screen, YELLOW, (20, y, CW - 40, rh - 2), 1)
+                    pygame.draw.rect(screen, DARK, (20, y, view.CW - 40, rh - 2))
+                    pygame.draw.rect(screen, YELLOW, (20, y, view.CW - 40, rh - 2), 1)
                 text(u["name"], 8, YELLOW if sel else WHITE, (28, y + 5), shadow=None)
                 pips(176, y + 5, lvl, total, LIME if maxed else YELLOW, NAVY if sel else DARK)
                 if maxed:
-                    text("MAX", 8, LIME, (CW - 28, y + 5), right=True, shadow=None)
+                    text("MAX", 8, LIME, (view.CW - 28, y + 5), right=True, shadow=None)
                 else:
                     cost = u["costs"][lvl]
-                    text(f"COST {cost}", 8, YELLOW if save["credits"] >= cost else RED, (CW - 28, y + 5),
+                    text(f"COST {cost}", 8, YELLOW if save["credits"] >= cost else RED, (view.CW - 28, y + 5),
                          right=True, shadow=None)
                 text(upgrade_info(u["key"], lvl, save["owned"]), 8, GREY, (28, y + 19), shadow=None)
             if S.notice[2] > 0:
                 text(S.notice[0], 8, S.notice[1], (0, 274), center=True)
-                S.notice[2] -= DT_SCALE
+                S.notice[2] -= view.DT_SCALE
             text("UP/DOWN SELECT  ENTER BUY  ESC BACK", 8, GREY, (0, CH - 14), center=True)
 
         elif S.state == "build":
@@ -4708,7 +3050,7 @@ def main():
             elif S.build_sel >= S.build_scroll + vis:
                 S.build_scroll = S.build_sel - vis + 1
             S.build_scroll = max(0, min(S.build_scroll, len(rows) - vis))
-            panel((16, 62, CW - 32, vis * rh + 6))
+            panel((16, 62, view.CW - 32, vis * rh + 6))
             pr = save["project"]
             for vi in range(vis):
                 i = S.build_scroll + vi
@@ -4718,8 +3060,8 @@ def main():
                 y = 65 + vi * rh
                 sel = i == S.build_sel
                 if sel:
-                    pygame.draw.rect(screen, DARK, (20, y, CW - 40, rh - 2))
-                    pygame.draw.rect(screen, YELLOW, (20, y, CW - 40, rh - 2), 1)
+                    pygame.draw.rect(screen, DARK, (20, y, view.CW - 40, rh - 2))
+                    pygame.draw.rect(screen, YELLOW, (20, y, view.CW - 40, rh - 2), 1)
                 if key in ("drones", "drone_tech"):
                     is_d = key == "drones"
                     costs = DRONE_COSTS if is_d else DRONE_TECH_COSTS
@@ -4747,12 +3089,12 @@ def main():
                     info = module_info(key, n)
                 text(name, 8, YELLOW if sel else WHITE, (28, y + 3), shadow=None)
                 pips(176, y + 3, n, total, LIME if maxed else YELLOW, NAVY if sel else DARK)
-                text(right[0], 8, right[1], (CW - 28, y + 3), right=True, shadow=None)
+                text(right[0], 8, right[1], (view.CW - 28, y + 3), right=True, shadow=None)
                 text(info, 8, GREY, (28, y + 14), shadow=None)
             if S.build_scroll > 0:
-                text("^", 8, WHITE, (CW - 22, 64))
+                text("^", 8, WHITE, (view.CW - 22, 64))
             if S.build_scroll + vis < len(rows):
-                text("v", 8, WHITE, (CW - 22, 62 + vis * rh - 6))
+                text("v", 8, WHITE, (view.CW - 22, 62 + vis * rh - 6))
             if pr:
                 m = module_by_key(pr["key"])
                 cost = m["costs"][save["base"][pr["key"]]]
@@ -4771,7 +3113,7 @@ def main():
                 text("CREDITS ARE PAID NOW, ORE COMES FROM YOUR TRIPS", 8, GREY, (20, 248))
             if S.notice[2] > 0:
                 text(S.notice[0], 8, S.notice[1], (0, 278), center=True)
-                S.notice[2] -= DT_SCALE
+                S.notice[2] -= view.DT_SCALE
             text("UP/DOWN SELECT  ENTER BUY/START  ESC BACK", 8, GREY, (0, CH - 14), center=True)
 
         elif S.state == "settings":
@@ -4779,8 +3121,8 @@ def main():
             text("SETTINGS", 24, YELLOW, (0, 10), center=True, shadow=RED)
             text("DISPLAY FPS CAP", 8, GREY, (0, 46), center=True)
             n = len(RENDER_FPS_OPTIONS)
-            cell = min(70, (CW - 40) // n)
-            x0 = CW // 2 - cell * n // 2
+            cell = min(70, (view.CW - 40) // n)
+            x0 = view.CW // 2 - cell * n // 2
             for i, opt in enumerate(RENDER_FPS_OPTIONS):
                 x = x0 + i * cell
                 sel = i == S.fps_sel
@@ -4794,7 +3136,7 @@ def main():
             text("A HIGHER CAP ONLY MAKES MOTION SMOOTHER", 8, GREY, (0, 150), center=True)
             if S.notice[2] > 0:
                 text(S.notice[0], 8, S.notice[1], (0, 178), center=True)
-                S.notice[2] -= DT_SCALE
+                S.notice[2] -= view.DT_SCALE
             text("LEFT/RIGHT SELECT  ENTER APPLY", 8, GREY, (0, 258), center=True)
             text("ESC - BACK", 8, GREY, (0, CH - 14), center=True)
 
@@ -4806,13 +3148,13 @@ def main():
                 y = 56 + i * 64
                 info = S.slot_info[i] if i < len(S.slot_info) else None
                 sel = i == S.slot_sel
-                panel((28, y, CW - 56, 58))
+                panel((28, y, view.CW - 56, 58))
                 if sel:
-                    pygame.draw.rect(screen, YELLOW, (28, y, CW - 56, 58), 1)
+                    pygame.draw.rect(screen, YELLOW, (28, y, view.CW - 56, 58), 1)
                 active = i + 1 == S.slot
                 text(f"SLOT {i + 1}", 8, YELLOW if sel else WHITE, (38, y + 6), shadow=None)
                 if active:
-                    text("ACTIVE", 8, LIME, (CW - 38, y + 6), right=True, shadow=None)
+                    text("ACTIVE", 8, LIME, (view.CW - 38, y + 6), right=True, shadow=None)
                 if info is None:
                     text("EMPTY - ENTER STARTS A NEW GAME", 8, GREY, (38, y + 26), shadow=None)
                 else:
@@ -4824,10 +3166,10 @@ def main():
                     text(f"SHIPS {len(info['owned'])}/{len(SHIPS)}   WORLD {info['seed'] % 10000:04d}   SECTOR {info['sector']}",
                          8, GREY, (38, y + 44), shadow=None)
             if S.confirm[1] > 0:
-                S.confirm = (S.confirm[0], S.confirm[1] - DT_SCALE)
+                S.confirm = (S.confirm[0], S.confirm[1] - view.DT_SCALE)
             if S.notice[2] > 0:
                 text(S.notice[0], 8, S.notice[1], (0, 250), center=True)
-                S.notice[2] -= DT_SCALE
+                S.notice[2] -= view.DT_SCALE
             text("UP/DOWN SELECT  ENTER PLAY/NEW  DEL ERASE", 8, GREY, (0, 266), center=True)
             text("ESC - BACK", 8, GREY, (0, CH - 14), center=True)
 
