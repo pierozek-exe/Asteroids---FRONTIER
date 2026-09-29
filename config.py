@@ -2,6 +2,8 @@
 import math
 from pathlib import Path
 
+import station_layout as _SL
+
 
 # --------------------
 # Stałe
@@ -28,13 +30,14 @@ SHIP_SPEED_MULT = 1.0      # mnożnik prędkości wszystkich statków (2.0 = dwa
 
 # świat
 WORLD_SEED = 20240921
-BASE_R = 1320              # promień planety-bazy (logika)
-BASE_ART_R = int(BASE_R * 0.4)   # ten sam promień w pikselach płótna
-PAD_R = BASE_R - 60        # odległość lądowisk od środka planety
-N_PADS = 16
-PAD_OFFSET = math.pi / N_PADS
+# baza = stacja w dzielnicach (station_layout.py): okrągłe centrum + platformy na mostach
+BASE_ART_R = int(_SL.extent())   # najdalszy punkt stacji w pikselach płótna
+BASE_R = round(BASE_ART_R / 0.4)   # to samo w jednostkach logiki (K = 0.4)
+PAD_XY = [(x / 0.4, y / 0.4) for x, y in _SL.pads()]   # duże lądowiska w kompleksie startowym (logika)
+N_PADS = len(PAD_XY)
+PAD_R = max(math.hypot(x, y) for x, y in PAD_XY)   # najdalsze lądowisko od środka stacji
 DOCK_R = BASE_R + 500      # w tej odległości od środka bazy zaczyna się automatyczne lądowanie
-LAUNCH_DIST = DOCK_R - PAD_R + 60   # o ile statek odlatuje od lądowiska w animacji startu
+LAUNCH_DIST = 900          # o ile statek odlatuje od lądowiska w animacji startu (na wschód, poza kompleks)
 SAFE_R = 5200              # strefa bez asteroid
 PLANET_MIN_D = 6400        # najbliższa planeta z surowcami
 TIER_STEP = 5000           # co tyle dalej od bazy asteroidy robią się twardsze

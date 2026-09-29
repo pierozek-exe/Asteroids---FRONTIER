@@ -69,7 +69,8 @@ def default_save():
             "drones": 0, "drone_tech": 0, "saved_at": 0.0,
             # endgame (sektor, relikty i artefakty zostają po skoku do nowego sektora)
             "sector": 1, "relics": 0, "relic_lv": {}, "artifacts": [], "earned": 0.0, "far": 0.0,
-            "seen": ["iron"], "contracts": []}
+            "seen": ["iron"], "contracts": [],
+            "vehicles": ["rover"], "vehicle": "rover"}   # pojazdy naziemne z garażu
 
 
 def load_save(path, upgrade_keys, ship_ids):
@@ -100,6 +101,8 @@ def load_save(path, upgrade_keys, ship_ids):
         data["far"] = max(0.0, float(raw.get("far", 0.0)))
         data["seen"] = [k for k in ORE_KINDS if k in raw.get("seen", []) or k == "iron"]
         data["contracts"] = [c for c in raw.get("contracts", []) if isinstance(c, dict) and c.get("type") in CONTRACT_TIME]
+        data["vehicles"] = [v["id"] for v in VEHICLES if v["id"] in raw.get("vehicles", []) or v["id"] == "rover"]
+        data["vehicle"] = raw.get("vehicle") if raw.get("vehicle") in data["vehicles"] else "rover"
         pr = raw.get("project")
         if isinstance(pr, dict) and pr.get("key") in {m["key"] for m in BASE_MODULES}:
             m = module_by_key(pr["key"])

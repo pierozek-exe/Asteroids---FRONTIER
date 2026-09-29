@@ -411,3 +411,19 @@ def special_info(key, lvl):
     nxt = special_value(key, lvl + 1)
     txt = f"{cur} > {nxt}"
     return txt if len(txt) <= 46 else f"NEXT: {nxt}"
+
+
+# --------------------
+# Pojazdy naziemne (GARAGE): na razie jeździsz nimi po stacji; ładownia i pancerz przydadzą się na planetach
+# --------------------
+VEHICLES = [
+    dict(id="rover", name="SCOUT ROVER", cost=0, sheet="rover.png", speed=6.0, accel=0.32, turn=3.6, reverse=3.0,
+         radius=18, stats=(3, 3, 2, 2), perk=("TRACKED ALL-ROUNDER", "TURNS ON THE SPOT", "FREE STARTER VEHICLE")),
+    dict(id="buggy", name="DUNE BUGGY", cost=round10(12000 * COST_MULT), sheet="buggy.png", speed=9.5, accel=0.5,
+         turn=3.0, reverse=4.0, radius=17, stats=(5, 4, 1, 1),
+         perk=("6 WHEELS, TOP SPEED", "WIDE TURNS AT SPEED", "TINY CARGO BAY")),
+    dict(id="crawler", name="HEAVY CRAWLER", cost=round10(45000 * COST_MULT), sheet="crawler.png", speed=3.8,
+         accel=0.18, turn=2.2, reverse=2.2, radius=24, stats=(1, 2, 5, 5),
+         perk=("HUGE TRACKS + ORE DRILL", "BIG ORE TANK", "BUILT FOR GIANT PLANETS")),
+]
+VEHICLE_STATS = ("SPEED", "HANDLING", "CARGO", "ARMOR")

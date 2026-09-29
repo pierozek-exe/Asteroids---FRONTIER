@@ -706,8 +706,720 @@ def b_engine():
     return p
 
 
+def hazard(p, x0, x1, y):
+    for i in range(x0, x1):
+        p.dot(i, y, R["yellow"][2] if (i // 2) % 2 else R["dark"][0])
+
+
+# --- miejsca na stacji (podjeżdżasz łazikiem i wciskasz ENTER) ---
+def b_hangar():
+    p = Painter()
+    p.box(0, 34, 58, 5, 3, "panel", "concrete")          # płyta
+    p.box(3, 8, 52, 24, 6, "steel", "white")             # hala
+    for x in range(8, 52, 7):                            # żebra dachu
+        p.line(x, 8, x, 13, R["steel"][1])
+    p.rect(12, 19, 34, 19, R["dark"][0])                 # wielka brama
+    for j in range(20, 38, 3):
+        p.rect(13, j, 32, 1, R["dark"][2])
+    p.rect(11, 18, 36, 1, R["steel"][3])
+    hazard(p, 12, 46, 37)
+    p.box(22, 14, 14, 2, 1, "yellow", "gold", outline=False)   # szyld nad bramą
+    p.dot(6, 8, RED_LAMP)
+    p.dot(51, 8, RED_LAMP)
+    p.anchors["lamp"] = (6, 8)
+    return p
+
+
+def b_garage():
+    p = Painter()
+    p.box(0, 27, 42, 4, 3, "panel", "concrete")
+    p.box(3, 8, 36, 18, 5, "steel", "concrete")
+    p.box(27, 3, 9, 3, 3, "dark", "panel")               # wentylator na dachu
+    p.rect(3, 14, 36, 1, R["orange"][2])                 # pas na elewacji
+    for dx in (6, 22):                                   # dwie bramy rolowane
+        for j in range(17, 31):
+            p.rect(dx, j, 14, 1, R["steel"][1] if j % 2 else R["steel"][0])
+    hazard(p, 5, 37, 31)
+    p.dot(20, 10, WIN)
+    return p
+
+
+def b_workshop():
+    p = Painter()
+    p.box(0, 32, 50, 5, 3, "panel", "concrete")
+    p.box(2, 13, 32, 19, 5, "steel", "concrete")
+    windows(p, 5, 21, 3, 2, seed=11)
+    p.rect(19, 23, 12, 12, R["dark"][0])                 # brama warsztatu
+    for j in range(24, 35, 2):
+        p.rect(20, j, 10, 1, R["dark"][2])
+    p.sphere(26, 18, 3, "orange")                        # godło (zębatka)
+    p.dot(26, 18, R["dark"][0])
+    p.line(40, 5, 40, 34, R["steel"][2], outline=True)   # dźwig
+    p.line(26, 5, 48, 5, R["yellow"][2], outline=True)
+    p.box(37, 3, 6, 2, 2, "yellow", "gold")
+    p.line(46, 6, 46, 15, R["dark"][2])
+    p.dot(46, 16, R["steel"][3])
+    p.box(42, 27, 7, 5, 3, "orange", "yellow")           # skrzynia z częściami
+    p.anchors["weld"] = (31, 30)
+    return p
+
+
+def b_lab():
+    p = Painter()
+    p.box(0, 34, 46, 5, 3, "panel", "concrete")
+    p.box(4, 20, 38, 14, 4, "white", "white")
+    windows(p, 7, 27, 7, 1, gx=4, seed=5)
+    p.sphere(14, 20, 8, "glass", half=True)              # kopuły laboratoriów
+    p.sphere(31, 21, 6, "cyan", half=True)
+    p.line(40, 6, 40, 20, R["dark"][3], outline=True)    # antena
+    p.dot(40, 5, CYAN_LAMP)
+    p.anchors["tip"] = (40, 5)
+    return p
+
+
+def b_mission():
+    p = Painter()
+    p.box(0, 42, 42, 5, 3, "panel", "concrete")
+    p.box(6, 30, 30, 12, 4, "steel", "concrete")
+    windows(p, 9, 37, 6, 1, gx=4, seed=7)
+    p.cyl(21, 14, 5, 22, "white", bands={3: "cyan", 4: "cyan", 12: "cyan"})   # wieża kontroli
+    p.box(12, 7, 19, 5, 3, "steel", "white")             # kabina z oknami dookoła
+    for i in range(14, 30, 3):
+        p.rect(i, 11, 2, 2, R["glass"][2])
+    p.line(21, 1, 21, 7, R["dark"][3], outline=True)
+    p.dot(21, 0, RED_LAMP)
+    p.anchors["lamp"] = (21, 0)
+    p.dish(36, 24, 6, 4, "white")                        # antena talerzowa
+    return p
+
+
+def b_gate():
+    p = Painter()
+    p.box(2, 46, 44, 5, 3, "panel", "concrete")
+    p.box(4, 32, 7, 14, 3, "steel", "concrete")          # pylony
+    p.box(37, 32, 7, 14, 3, "steel", "concrete")
+    cx, cy, rx, ry = 24, 25, 17, 21
+    inner = {}
+    for j in range(-ry + 4, ry - 3):                     # wir w środku bramy
+        for i in range(-rx + 4, rx - 3):
+            u, v = i / (rx - 3.5), j / (ry - 3.5)
+            q = u * u + v * v
+            if q <= 1.0:
+                sw = (math.atan2(v, u) * 3 + q * 9) % math.tau
+                inner[(cx + i, cy + j)] = R["purple"][1 + int(sw / math.tau * 3) % 3] if q > 0.15 else FIXED["m"]
+    p.put(inner, outline=False)
+    ring = {}
+    for k in range(720):
+        a = k * math.tau / 720
+        for t in range(4):
+            x, y = cx + round(math.cos(a) * (rx - t)), cy + round(math.sin(a) * (ry - t))
+            d = -(math.cos(a) * LIGHT[0] + math.sin(a) * LIGHT[1])
+            tone = 3 if (t == 0 and d < -0.3) else (2 if d < 0.2 else 1) if t < 3 else 0
+            ring[(x, y)] = R["steel"][tone] if k % 60 < 50 else R["purple"][3]
+    p.put(ring)
+    p.anchors["core"] = (cx, cy)
+    return p
+
+
+def rover_sheet():
+    """Mały łazik gąsienicowy (dziób w górę, jak statki): 3 klatki = przesunięcie ogniw gąsienic."""
+    frames = []
+    for f in range(3):
+        pts = {}
+        for y in range(2, 21):                          # gąsienice (4 px szerokości) z ogniwami
+            for x in (0, 1, 2, 3, 14, 15, 16, 17):
+                if y in (2, 20) and x in (0, 3, 14, 17):
+                    continue                            # zaokrąglone końce (koła napędowe)
+                seg = (y + f) % 3 == 0
+                inner = x in (3, 14)
+                col = R["steel"][2 if x in (1, 15) else 1] if seg else R["dark"][1]
+                if x in (0, 17):
+                    col = R["dark"][2] if seg else R["dark"][0]
+                if inner:
+                    col = R["steel"][0]
+                pts[(x, y)] = col
+            if y in (3, 19):                            # piasty kół na końcach gąsienic
+                pts[(1, y)] = pts[(15, y)] = R["steel"][3]
+                pts[(2, y)] = pts[(16, y)] = R["steel"][2]
+        for y in range(3, 20):                          # kadłub
+            for x in range(4, 14):
+                t = 3 if (x == 4 or y == 3) else (2 if x < 8 else (1 if x < 12 else 0))
+                pts[(x, y)] = R["orange"][t]
+        for x in range(5, 13):                          # zderzak z przodu
+            pts[(x, 2)] = R["steel"][3 if x < 9 else 2]
+        for y in range(5, 10):                          # kabina z szybą
+            for x in range(5, 13):
+                edge = y == 5 or x in (5, 12)
+                pts[(x, y)] = R["steel"][2] if edge else R["glass"][3 if (x < 8 and y == 6) else (2 if x < 10 else 1)]
+        for x in range(5, 13):                          # pas ostrzegawczy
+            pts[(x, 11)] = R["yellow"][2] if (x // 2) % 2 else R["dark"][0]
+        for y in range(13, 19):                         # skrzynia ładunkowa
+            for x in range(6, 12):
+                pts[(x, y)] = R["dark"][1] if (x in (6, 11) or y in (13, 18)) else R["dark"][2 if (x + y) % 2 else 3]
+        pts[(5, 1)] = pts[(12, 1)] = FIXED["y"]         # reflektory
+        pts[(12, 17)] = RED_LAMP                        # lampka
+        p = Painter()
+        p.put(pts)
+        frames.append(p.surface(shadow=False))
+    fw, fh = frames[0].get_size()
+    sheet = pygame.Surface((fw * 3, fh), pygame.SRCALPHA)
+    for i, fr in enumerate(frames):
+        sheet.blit(fr, (i * fw, 0))
+    return sheet
+
+
 BUILDINGS = {"drill": b_drill, "refinery": b_refinery, "vault": b_vault, "hq": b_hq, "scanner": b_scanner,
-             "trade": b_trade, "shield": b_shield, "warp": b_warp, "engine": b_engine}
+             "trade": b_trade, "shield": b_shield, "warp": b_warp, "engine": b_engine,
+             "hangar": b_hangar, "garage": b_garage, "workshop": b_workshop, "lab": b_lab, "mission": b_mission,
+             "gate": b_gate}
+
+
+# --------------------
+# Stacja kosmiczna (baza gracza): widok z góry, ten sam rozmiar co dawna planeta-baza (1068 px, promień 528),
+# więc lądowiska, kolizje i sloty budynków w grze pasują bez zmian.
+# Strefy od zewnątrz: pierścień dokujący (rura z paneli) -> szczelina z kratownicą -> pokład główny
+# (sektory płyt, korytarze-szprychy) -> hub pod centrum dowodzenia. Całość lekko wypukła: światło z lewej-góry,
+# przejścia między tonami ditherowane macierzą Bayera (jak na planetach).
+# --------------------
+BAYER = ((0, 8, 2, 10), (12, 4, 14, 6), (3, 11, 1, 9), (15, 7, 13, 5))
+ST_R = 500            # promień okrągłego centrum stacji (station_layout.CORE_R)
+RING_IN, RING_OUT = 472, 496   # obręcz-chodnik wokół pokładu z modułami
+DECK_R = 470          # krawędź pokładu głównego
+HUB_R = 118
+DECK_BANDS = (HUB_R, 185, 255, 325, 395, DECK_R)   # granice pierścieni płyt
+DECK_SEGS = (18, 26, 34, 42, 50)                    # płyty w każdym pierścieniu
+SPOKES = 8
+PLATE_KINDS = ("panel", "panel", "panel", "panel", "steel", "steel", "concrete", "solar", "vent", "dark", "dark")
+
+
+def _lit(nx, ny, nz):
+    return nx * LIGHT[0] + ny * LIGHT[1] + nz * LIGHT[2]
+
+
+def _dither_tone(v, x, y):
+    """Ciągła jasność (0..3) -> ton rampy z ditheringiem Bayera na przejściach."""
+    base = int(v)
+    frac = v - base
+    return max(0, min(3, base + (1 if frac * 16 > BAYER[y % 4][x % 4] + 0.5 else 0)))
+
+
+def station_core():
+    """Okrągłe centrum stacji: pokład z płytami i szprychami pod moduły bazy, hub pod centrum dowodzenia, obręcz."""
+    size = 2 * 504
+    c = size // 2
+    rng = random.Random(1320)
+    kinds = [[rng.choice(PLATE_KINDS) for _ in range(n)] for n in DECK_SEGS]
+    shade = [[rng.uniform(-0.35, 0.35) for _ in range(n)] for n in DECK_SEGS]   # każda płyta trochę inna
+    surf = pygame.Surface((size, size), pygame.SRCALPHA)
+    ring_mid, ring_half = (RING_IN + RING_OUT) / 2, (RING_OUT - RING_IN) / 2
+    spoke_w = 11.0
+    lx, ly = LIGHT[0], LIGHT[1]
+    for y in range(size):
+        dy = y - c + 0.5
+        for x in range(size):
+            dx = x - c + 0.5
+            r = math.hypot(dx, dy)
+            if r > ST_R:
+                continue
+            a = math.atan2(dy, dx) % math.tau
+            ux, uy = dx / r if r else 0.0, dy / r if r else 0.0
+            s_ = 0.85 * r / ST_R   # wypukłość całej stacji: światło z lewej-góry, cień z prawej-dołu
+            nl = math.sqrt(1 + s_ * s_)
+            d_ = _lit(ux * s_ / nl, uy * s_ / nl, 1 / nl)
+            dome = max(0.0, min(1.0, (d_ - 0.3) / 0.62))   # 0 = najciemniej, 1 = najjaśniej
+            col = None
+            if r > RING_OUT:                                        # obręcz zewnętrzna
+                col = OUTLINE[:3] if r > ST_R - 2 else R["steel"][3 if (ux * LIGHT[0] + uy * LIGHT[1]) > 0.25 else 0]
+            elif r > RING_IN:                                       # pierścień dokujący: rura
+                s = (r - ring_mid) / ring_half
+                d = _lit(ux * s, uy * s, math.sqrt(max(0.0, 1 - s * s)))
+                seg = (a / math.tau * 64) % 1.0
+                if seg < 0.045 or abs(r - RING_IN) < 1.2 or abs(r - RING_OUT) < 1.2:
+                    col = R["dark"][1]
+                elif abs(r - ring_mid) < 1.6 and int(a / math.tau * 128) % 2 == 0:
+                    col = (255, 205, 117) if int(a / math.tau * 256) % 5 else (180, 255, 250)   # rząd świateł
+                else:
+                    col = R["steel"][_dither_tone(0.4 + 3.2 * max(0.0, d), x, y)]
+            elif r > DECK_R:                                        # szczelina z kratownicą
+                strut = (a / math.tau * 96) % 1.0 < 0.18 or (a / math.tau * 16) % 1.0 < 0.06
+                col = R["steel"][1] if strut else (R["dark"][1] if (x + y) % 3 == 0 else R["dark"][0])
+            else:
+                # korytarze-szprychy
+                k = round(a / math.tau * SPOKES - 0.5) + 0.5
+                sa = k * math.tau / SPOKES
+                off = abs(-math.sin(sa) * dx + math.cos(sa) * dy)
+                along = math.cos(sa) * dx + math.sin(sa) * dy
+                if r > HUB_R and along > 0 and off < spoke_w:
+                    if off > spoke_w - 1.5:
+                        col = R["dark"][1]
+                    elif off < 1.0 and int(r) % 14 < 2:
+                        col = (180, 255, 250)                       # lampki na osi korytarza
+                    else:
+                        col = R["concrete"][_dither_tone(0.7 + 2.1 * dome, x, y)]
+                elif r <= HUB_R:                                    # hub pod centrum dowodzenia
+                    if abs(r - 100) < 1.5 and int(a / math.tau * 48) % 2 == 0:
+                        col = (115, 239, 247)
+                    elif abs(r - HUB_R) < 1.5 or abs(r - 92) < 1:
+                        col = R["dark"][1]
+                    else:
+                        col = R["panel"][_dither_tone(0.8 + 2.2 * dome, x, y)]
+                else:                                               # pokład: sektory płyt
+                    band = next(i for i in range(len(DECK_SEGS)) if r <= DECK_BANDS[i + 1])
+                    r0, r1 = DECK_BANDS[band], DECK_BANDS[band + 1]
+                    n = DECK_SEGS[band]
+                    fa = a / math.tau * n
+                    seg = int(fa) % n
+                    kind = kinds[band][seg]
+                    arc = math.tau * r / n
+                    e_start, e_end = fa % 1.0 * arc, (1 - fa % 1.0) * arc   # px od szwów kątowych
+                    e_in, e_out = r - r0, r1 - r                            # px od szwów promieniowych
+                    edge = min(e_start, e_end, e_in, e_out)
+                    # normalna najbliższej krawędzi (na zewnątrz płyty) -> fazka jasna od światła, ciemna od cienia
+                    tx, ty = -uy, ux
+                    nx, ny = ((-tx, -ty) if edge == e_start else (tx, ty) if edge == e_end
+                              else (-ux, -uy) if edge == e_in else (ux, uy))
+                    facing = nx * lx + ny * ly > 0
+                    base_v = 0.4 + 2.2 * dome + shade[band][seg]
+                    if edge < 1.2:
+                        col = R["dark"][0]                          # szew między płytami
+                    elif edge < 3.0 and kind not in ("vent", "solar"):
+                        col = R[kind if kind != "dark" else "panel"][_dither_tone(base_v + (1.1 if facing else -1.0), x, y)]
+                    elif kind == "solar":
+                        gx, gy = int(min(e_start, e_end)) % 6, int(min(e_in, e_out)) % 6
+                        col = R["dark"][1] if (gx == 0 or gy == 0) else R["navyblue"][_dither_tone(0.8 + 1.8 * dome, x, y)]
+                    elif kind == "vent":
+                        col = R["dark"][0] if int(e_in) % 4 < 2 else R["dark"][_dither_tone(1.0 + 1.6 * dome, x, y)]
+                    elif kind == "dark":
+                        col = R["dark"][_dither_tone(0.9 + 1.8 * dome + shade[band][seg], x, y)]
+                    else:
+                        col = R[kind][_dither_tone(base_v - 0.3, x, y)]
+                    if col is None:
+                        col = R["panel"][1]
+            surf.set_at((x, y), (*col[:3], 255))
+    # drobne detale: włazy i światła pozycyjne na pierścieniu (czerwone po jednej stronie, zielone po drugiej)
+    for i in range(24):
+        a = i * math.tau / 24 + 0.13
+        px_, py_ = c + math.cos(a) * (RING_OUT - 4), c + math.sin(a) * (RING_OUT - 4)
+        lamp = (239, 70, 80) if math.cos(a) < 0 else (120, 255, 140)
+        pygame.draw.rect(surf, (*lamp, 255), (round(px_) - 1, round(py_) - 1, 2, 2))
+    for _ in range(60):
+        a = rng.uniform(0, math.tau)
+        rr = rng.uniform(HUB_R + 12, DECK_R - 12)
+        px_, py_ = round(c + math.cos(a) * rr), round(c + math.sin(a) * rr)
+        pygame.draw.rect(surf, (*R["dark"][0], 255), (px_ - 3, py_ - 2, 6, 4))
+        pygame.draw.rect(surf, (*R["steel"][2], 255), (px_ - 2, py_ - 1, 4, 2))
+    return surf
+
+
+# --------------------
+# Dekoracje dzielnic (wypiekane w obraz stacji) i duża brama skoku
+# --------------------
+def d_gantry():
+    p = Painter()
+    p.box(0, 60, 28, 4, 3, "panel", "concrete")
+    p.line(5, 10, 5, 60, R["steel"][2], outline=True)       # nogi wieży
+    p.line(21, 10, 21, 60, R["steel"][0], outline=True)
+    for y in range(12, 58, 8):                              # kratownica
+        p.line(5, y, 21, y + 8, R["dark"][3])
+        p.line(21, y, 5, y + 8, R["dark"][2])
+    p.line(21, 26, 44, 26, R["steel"][2], outline=True)     # ramię do rakiety
+    p.box(1, 4, 25, 6, 3, "orange", "yellow")
+    p.dot(13, 2, RED_LAMP)
+    return p
+
+
+def d_tank():
+    p = Painter()
+    p.box(0, 32, 22, 4, 2, "panel", "concrete")
+    p.cyl(11, 8, 9, 26, "white", bands={5: "orange", 6: "orange", 19: "orange"})
+    return p
+
+
+def d_booth():
+    p = Painter()
+    p.box(0, 10, 38, 14, 4, "steel", "concrete")
+    windows(p, 3, 17, 7, 1, gx=5, seed=21)
+    p.line(32, 2, 32, 10, R["dark"][3], outline=True)
+    p.dot(32, 1, RED_LAMP)
+    return p
+
+
+def d_post():
+    p = Painter()
+    p.line(2, 1, 2, 15, R["steel"][2], outline=True)
+    p.dot(2, 0, WIN)
+    p.rect(0, 15, 5, 2, R["dark"][2])
+    return p
+
+
+def d_charger():
+    p = Painter()
+    p.box(0, 4, 9, 12, 3, "steel", "concrete")
+    p.rect(2, 9, 5, 3, (115, 239, 247))
+    p.line(8, 12, 12, 16, R["dark"][1])
+    return p
+
+
+def d_crates():
+    p = Painter()
+    p.box(0, 12, 14, 8, 4, "orange", "yellow")
+    p.box(13, 14, 12, 7, 3, "steel", "concrete")
+    p.box(4, 2, 12, 8, 4, "yellow", "gold")
+    for x in (3, 10):
+        p.line(x, 16, x, 22, R["orange"][0])
+    return p
+
+
+def d_engine():
+    p = Painter()
+    p.box(4, 20, 30, 4, 3, "panel", "concrete")
+    pts = {}
+    for i in range(2, 30):
+        for j in range(-6, 7):
+            v = (j + 0.5) / 7
+            ramp = R["orange"] if 12 <= i <= 14 else R["steel"]
+            pts[(i, 13 + j)] = ramp[tone_of((0.0, v, math.sqrt(max(0.0, 1 - v * v))), 0.1)]
+    for i in range(30, 35):
+        r_ = 5 + (i - 30) // 2
+        for j in range(-r_, r_ + 1):
+            v = (j + 0.5) / (r_ + 1)
+            pts[(i, 13 + j)] = R["dark"][tone_of((0.0, v, math.sqrt(max(0.0, 1 - v * v))), 0.2)]
+    p.put(pts)
+    return p
+
+
+def d_arm():
+    p = Painter()
+    p.cyl(8, 20, 6, 6, "steel", "dark")
+    p.line(8, 19, 16, 6, R["yellow"][2], outline=True)
+    p.line(16, 6, 28, 12, R["yellow"][1], outline=True)
+    p.sphere(16, 6, 2, "orange")
+    p.line(28, 12, 30, 16, R["steel"][2])
+    p.line(28, 12, 26, 16, R["steel"][2])
+    return p
+
+
+def d_cradle():
+    """Kadłub statku w doku remontowym: rusztowanie, brakujące płyty, żółte ramiona podpór."""
+    p = Painter()
+    p.box(0, 34, 84, 5, 3, "panel", "concrete")
+    for x in (6, 78):
+        p.line(x, 4, x, 34, R["steel"][1], outline=True)
+        for y in range(8, 34, 6):
+            p.line(x - 3, y, x + 3, y, R["dark"][3])
+    p.box(12, 10, 60, 18, 6, "steel", "white")
+    for x0 in (22, 40, 54):                                 # zdjęte płyty poszycia
+        p.rect(x0, 20, 8, 6, R["dark"][0])
+        p.rect(x0 + 1, 21, 6, 1, R["orange"][1])
+    p.sphere(70, 22, 6, "glass", half=True)
+    for x in (20, 60):
+        p.line(x, 34, x + 4, 28, R["yellow"][2], outline=True)
+    p.dot(42, 8, (255, 245, 200))                           # iskry spawania
+    p.dot(43, 7, (255, 205, 117))
+    return p
+
+
+def d_plates():
+    p = Painter()
+    for i in range(4):
+        p.box(0 + i, 14 - i * 3, 40, 2, 3, "steel", "concrete")
+    return p
+
+
+def d_container():
+    p = Painter()
+    p.box(0, 6, 52, 14, 6, "blue", "navyblue")
+    for x in range(3, 50, 5):
+        p.line(x, 12, x, 25, R["blue"][0])
+    p.rect(44, 13, 5, 10, R["dark"][1])
+    return p
+
+
+def d_dish():
+    p = Painter()
+    p.box(2, 26, 18, 4, 2, "panel", "concrete")
+    p.cyl(11, 16, 2, 11, "steel")
+    p.dish(10, 11, 10, 7, "white")
+    p.line(10, 11, 16, 3, R["dark"][3], outline=True)
+    p.dot(16, 2, CYAN_LAMP)
+    return p
+
+
+def d_biggate():
+    """Brama skoku w pełnej skali: pierścień z panelami, pylony, wir w środku."""
+    p = Painter()
+    cx, cy, rx, ry = 60, 62, 46, 56
+    p.box(4, 112, 112, 8, 4, "panel", "concrete")
+    p.box(6, 70, 16, 42, 5, "steel", "concrete")
+    p.box(98, 70, 16, 42, 5, "steel", "concrete")
+    inner = {}
+    for j in range(-ry + 8, ry - 7):
+        for i in range(-rx + 8, rx - 7):
+            u, v = i / (rx - 7.5), j / (ry - 7.5)
+            q = u * u + v * v
+            if q <= 1.0:
+                sw = (math.atan2(v, u) * 3 + q * 11) % math.tau
+                inner[(cx + i, cy + j)] = R["purple"][1 + int(sw / math.tau * 3) % 3] if q > 0.08 else FIXED["m"]
+    p.put(inner, outline=False)
+    ring = {}
+    for k in range(1600):
+        a = k * math.tau / 1600
+        for t in range(8):
+            x, y = cx + round(math.cos(a) * (rx - t)), cy + round(math.sin(a) * (ry - t))
+            d = -(math.cos(a) * LIGHT[0] + math.sin(a) * LIGHT[1])
+            if k % 100 < 8:
+                col = R["purple"][3]                            # świecące węzły
+            elif t in (0, 7):
+                col = R["dark"][1]
+            else:
+                col = R["steel"][3 if d < -0.35 else (2 if d < 0.25 else 1)]
+            ring[(x, y)] = col
+    p.put(ring)
+    return p
+
+
+DECOR = {"gantry": d_gantry, "tank": d_tank, "booth": d_booth, "post": d_post, "charger": d_charger,
+         "crates": d_crates, "engine": d_engine, "arm": d_arm, "cradle": d_cradle, "plates": d_plates,
+         "container": d_container, "dish": d_dish, "biggate": d_biggate}
+
+
+# --------------------
+# Stacja w dzielnicach: centrum + mosty + platformy (układ z station_layout.py)
+# --------------------
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import station_layout as SL   # noqa: E402
+
+ZONE_TEXT = {"launch": "L-1 LAUNCH", "garage": "V-YARD", "hangar": "HANGAR BAY", "workshop": "WORKSHOP",
+             "lab": "R&D", "mission": "MISSION CTRL", "gate": "JUMP GATE"}
+
+
+def _floor(style, lx, ly, w, h, lv, x, y, z):
+    """Kolor podłogi dzielnicy w punkcie (lx, ly) od lewego-górnego rogu platformy; lv = oświetlenie 0..1."""
+    if style == "launch":
+        for px_, py_ in SL.PAD_SPOTS:                       # wymalowane lądowiska
+            dx, dy = lx - (w / 2 + px_), ly - (h / 2 + py_)
+            d = math.hypot(dx, dy)
+            if d < SL.PAD_RADIUS:
+                if d > SL.PAD_RADIUS - 5:
+                    return R["yellow"][2] if (math.atan2(dy, dx) * 8 / math.pi) % 2 < 1.4 else R["dark"][0]
+                if d > SL.PAD_RADIUS - 8:
+                    return R["dark"][0]
+                if abs(d - 40) < 1.2 and (math.atan2(dy, dx) * 12 / math.pi) % 2 < 1:
+                    return R["white"][2]
+                if (16 <= abs(dx) <= 23 and abs(dy) <= 27) or (abs(dy) <= 3 and abs(dx) <= 23):
+                    return R["yellow"][2]                   # litera H
+                return R["dark"][_dither_tone(1.2 + 1.2 * lv, x, y)]
+        if lx % 40 < 1 or ly % 40 < 1:
+            return R["concrete"][0]
+        return R["concrete"][_dither_tone(0.6 + 1.6 * lv, x, y)]
+    if style == "garage":
+        for sx_, sy_ in SL.VEHICLE_SPOTS:                   # zatoki parkingowe
+            dx, dy = abs(lx - (w / 2 + sx_)), abs(ly - (h / 2 + sy_))
+            if dx < 32 and dy < 44 and (dx > 29 or dy > 41) and not (dy > 41 and ly > h / 2 + sy_):
+                return R["concrete"][3]
+        if abs(ly - (h / 2 - 5)) < 1 and (lx // 12) % 2 == 0:
+            return R["yellow"][2]                           # pas ruchu
+        return R["dark"][_dither_tone(1.0 + 1.4 * lv + (0.3 if (x * 7 + y * 13) % 11 == 0 else 0), x, y)]
+    if style == "hangar":
+        for sx_, sy_ in SL.SHIP_SPOTS:                      # stanowiska statków
+            d = math.hypot(lx - (w / 2 + sx_), ly - (h / 2 + sy_))
+            if abs(d - 34) < 1.0:
+                return R["yellow"][1]
+        if abs(ly - (h / 2 + 65)) < 1 and (lx // 10) % 2 == 0:
+            return R["yellow"][2]
+        if lx % 32 < 1 or ly % 32 < 1:
+            return R["dark"][1]
+        return R["panel"][_dither_tone(0.7 + 1.6 * lv, x, y)]
+    if style == "workshop":
+        e = min(lx, ly, w - lx, h - ly)
+        if 10 < e < 20:                                     # pas ostrzegawczy
+            return R["yellow"][2] if ((lx + ly) // 8) % 2 else R["dark"][0]
+        if (lx + ly) % 4 == 0 and (lx // 4 + ly // 4) % 2 == 0:
+            return R["steel"][3]                            # blacha ryflowana
+        return R["steel"][_dither_tone(0.4 + 1.5 * lv, x, y)]
+    if style == "lab":
+        if lx % 22 < 1 or ly % 22 < 1:
+            return R["panel"][1]
+        if ly % 66 < 1:
+            return (56, 170, 200)
+        return R["concrete"][_dither_tone(0.8 + 1.4 * lv, x, y)]
+    if style == "mission":
+        if lx % 72 < 1 or ly % 72 < 1:
+            return (37, 113, 121)
+        if lx % 24 < 1 or ly % 24 < 1:
+            return R["dark"][0]
+        return R["dark"][_dither_tone(1.3 + 1.4 * lv, x, y)] if (lx // 24 + ly // 24) % 2 else \
+            R["navyblue"][_dither_tone(0.4 + 1.1 * lv, x, y)]
+    # gate: ciemna podłoga z fioletowymi okręgami wokół bramy
+    d = math.hypot(lx - w / 2, ly - (h / 2 - 20))
+    if abs(d % 34 - 17) < 0.9:
+        return R["purple"][2 if d < 110 else 1]
+    return R["dark"][_dither_tone(0.9 + 1.4 * lv + (0.5 if d < 90 else 0.0), x, y)]
+
+
+def zone_platform(surf, z, c, font):
+    x0, y0 = c + z["cx"] - z["w"] // 2, c + z["cy"] - z["h"] // 2
+    w, h = z["w"], z["h"]
+    for ly in range(h):
+        for lx in range(w):
+            wx, wy = x0 + lx - c, y0 + ly - c
+            if not SL._in_round_rect(wx, wy, z):
+                continue
+            # odległość do krawędzi (z zaokrąglonymi narożnikami)
+            ex, ey = min(lx, w - 1 - lx), min(ly, h - 1 - ly)
+            k = SL.CORNER
+            e = (k - math.hypot(k - ex, k - ey)) if (ex < k and ey < k) else min(ex, ey)
+            lv = 1 - 0.5 * (lx / w + ly / h)                # platforma jaśniejsza z lewej-góry
+            x, y = x0 + lx, y0 + ly
+            if e < 1.5:
+                col = OUTLINE[:3]
+            elif e < 6:
+                lit_side = (ex < ey and lx < w / 2) or (ey <= ex and ly < h / 2)
+                col = R["steel"][3 if lit_side else 1]      # obrzeże platformy
+                if e > 3.5 and (lx + ly) % 18 == 0:
+                    col = (115, 239, 247)                   # lampki na obrzeżu
+            elif e < 7.5:
+                col = R["dark"][0]
+            else:
+                col = _floor(z["style"], lx, ly, w, h, lv, x, y, z)
+            surf.set_at((x, y), (*col[:3], 255))
+    label = font.render(ZONE_TEXT[z["key"]], False, R["dark"][0])   # napis wymalowany na podłodze
+    label.set_alpha(150)
+    surf.blit(label, (x0 + w - label.get_width() - 26, y0 + h - 44))
+
+
+def bridge(surf, x0, y0, x1, y1):
+    dx, dy = x1 - x0, y1 - y0
+    L_ = math.hypot(dx, dy)
+    ux, uy = dx / L_, dy / L_
+    qx, qy = -uy, ux
+    hw = SL.BRIDGE_W / 2
+
+    def quad(o0, o1):
+        return [(x0 + qx * o0, y0 + qy * o0), (x1 + qx * o0, y1 + qy * o0),
+                (x1 + qx * o1, y1 + qy * o1), (x0 + qx * o1, y0 + qy * o1)]
+
+    pygame.draw.polygon(surf, (*OUTLINE[:3], 255), quad(-hw - 2, hw + 2))
+    pygame.draw.polygon(surf, (*R["panel"][1], 255), quad(-hw + 4, hw - 4))
+    lit = qx * LIGHT[0] + qy * LIGHT[1] < 0                 # która krawędź jest od strony światła
+    pygame.draw.polygon(surf, (*R["steel"][3 if lit else 1], 255), quad(-hw, -hw + 4))
+    pygame.draw.polygon(surf, (*R["steel"][1 if lit else 3], 255), quad(hw - 4, hw))
+    for t in range(0, int(L_), 22):                         # szwy płyt w poprzek mostu
+        a = (x0 + ux * t + qx * (-hw + 4), y0 + uy * t + qy * (-hw + 4))
+        b = (x0 + ux * t + qx * (hw - 4), y0 + uy * t + qy * (hw - 4))
+        pygame.draw.line(surf, (*R["dark"][1], 255), a, b)
+        for s in (-hw + 2, hw - 2):
+            if t % 44 == 0:
+                pygame.draw.rect(surf, (115, 239, 247, 255), (round(x0 + ux * t + qx * s) - 1, round(y0 + uy * t + qy * s) - 1, 2, 2))
+    for s in (-12, 12):                                     # linie pasów ruchu
+        for t in range(0, int(L_) - 10, 16):
+            a = (x0 + ux * t + qx * s, y0 + uy * t + qy * s)
+            b = (x0 + ux * (t + 8) + qx * s, y0 + uy * (t + 8) + qy * s)
+            pygame.draw.line(surf, (*R["panel"][3], 255), a, b)
+
+
+def station():
+    ext = int(SL.extent()) + 16
+    size, c = 2 * ext, ext
+    surf = pygame.Surface((size, size), pygame.SRCALPHA)
+    font = pygame.font.Font(str(OUT.parent / "assets" / "PressStart2P-Regular.ttf"), 16)
+    for x0, y0, x1, y1 in SL.bridges():
+        bridge(surf, c + x0, c + y0, c + x1, c + y1)
+    for z in SL.ZONES.values():
+        zone_platform(surf, z, c, font)
+    core = station_core()
+    surf.blit(core, core.get_rect(center=(c, c)))
+    items = []
+    for zone, name, dx, dy, _, _ in SL.ITEMS:
+        spr = (DECOR[name] if name in DECOR else BUILDINGS[name])().surface()
+        x, y = SL.zone_point(zone, dx, dy)
+        items.append((y, spr, c + x, c + y))
+    for _, spr, x, y in sorted(items, key=lambda t: t[0]):   # od góry do dołu: bliższe przykrywają dalsze
+        surf.blit(spr, spr.get_rect(center=(round(x), round(y))))
+    return surf
+
+
+# --------------------
+# Pojazdy naziemne (dziób w górę, 3 klatki animacji kół / gąsienic)
+# --------------------
+def buggy_sheet():
+    frames = []
+    for f in range(3):
+        pts = {}
+        for wy in (4, 12, 20):                              # 6 kół z bieżnikiem
+            for x0 in (0, 16):
+                for y in range(wy, wy + 5):
+                    for x in range(x0, x0 + 4):
+                        tread = (y + f) % 2 == 0
+                        pts[(x, y)] = R["dark"][2 if tread else 0] if x in (x0 + 1, x0 + 2) else R["dark"][1]
+                pts[(x0 + 1 + (x0 > 0), wy + 2)] = R["steel"][2]   # piasta
+        for y in range(2, 25):                              # kadłub
+            for x in range(4, 16):
+                if y < 5 and (x < 6 or x > 13):
+                    continue
+                t = 3 if (x == 4 or y == 2) else (2 if x < 9 else (1 if x < 14 else 0))
+                pts[(x, y)] = R["blue"][t]
+        for x in range(6, 14):                              # rama bezpieczeństwa
+            pts[(x, 13)] = R["steel"][3 if x < 10 else 2]
+        for y in range(7, 12):                              # kabina
+            for x in range(6, 14):
+                pts[(x, y)] = R["glass"][3 if (x < 9 and y == 8) else (2 if x < 11 else 1)]
+        for x in range(3, 17):                              # spojler
+            pts[(x, 24)] = R["red"][2 if x < 10 else 1]
+        pts[(6, 1)] = pts[(13, 1)] = FIXED["y"]
+        pts[(9, 18)] = pts[(10, 18)] = R["cyan"][2]
+        p = Painter()
+        p.put(pts)
+        frames.append(p.surface(shadow=False))
+    return _sheet(frames)
+
+
+def crawler_sheet():
+    frames = []
+    for f in range(3):
+        pts = {}
+        for y in range(4, 33):                              # szerokie gąsienice
+            for x in list(range(0, 6)) + list(range(22, 28)):
+                if y in (4, 32) and x in (0, 5, 22, 27):
+                    continue
+                seg = (y + f) % 3 == 0
+                col = R["steel"][2] if seg else R["dark"][1]
+                if x in (0, 27):
+                    col = R["dark"][2] if seg else R["dark"][0]
+                if x in (5, 22):
+                    col = R["steel"][0]
+                pts[(x, y)] = col
+        for y in range(6, 32):                              # kadłub
+            for x in range(6, 22):
+                t = 3 if (x == 6 or y == 6) else (2 if x < 12 else (1 if x < 19 else 0))
+                pts[(x, y)] = R["yellow"][t]
+        for y in range(0, 7):                               # wiertło z przodu
+            half = 1 + y // 2
+            for x in range(14 - half, 14 + half):
+                pts[(x, y)] = R["steel"][3 if (x + y + f) % 3 == 0 else 1]
+        for y in range(8, 14):                              # kabina
+            for x in range(8, 14):
+                pts[(x, y)] = R["glass"][3 if (x < 10 and y == 9) else 2]
+        for y in range(18, 30):                             # zbiornik na rudę
+            for x in range(9, 19):
+                pts[(x, y)] = R["dark"][1] if (x in (9, 18) or y in (18, 29)) else R["orange"][2 if (x + y) % 4 else 3]
+        for x in (16, 18):                                  # rury wydechowe
+            pts[(x, 9)] = pts[(x, 10)] = R["dark"][0]
+        pts[(8, 5)] = pts[(19, 5)] = FIXED["y"]
+        pts[(20, 30)] = RED_LAMP
+        p = Painter()
+        p.put(pts)
+        frames.append(p.surface(shadow=False))
+    return _sheet(frames)
+
+
+def _sheet(frames):
+    fw = max(f.get_width() for f in frames)
+    fh = max(f.get_height() for f in frames)
+    sheet = pygame.Surface((fw * len(frames), fh), pygame.SRCALPHA)
+    for i, fr in enumerate(frames):
+        sheet.blit(fr, (i * fw + (fw - fr.get_width()) // 2, (fh - fr.get_height()) // 2))
+    return sheet
 
 
 def build_all():
@@ -728,6 +1440,11 @@ def build_all():
         out[f"bld_{key}.png"] = p.surface()
         if p.offsets:
             print(f"  {key}: {p.offsets}")
+    out["rover.png"] = rover_sheet()
+    out["buggy.png"] = buggy_sheet()
+    out["crawler.png"] = crawler_sheet()
+    if "--no-station" not in sys.argv:   # największa grafika, liczy się kilka sekund
+        out["base_station.png"] = station()
     return out
 
 

@@ -1,8 +1,8 @@
 """Asteroids: FRONTIER (pygame, pixel art).
 
-Nowy tryb gry: nieskończony kosmos, własna planeta-baza, wyprawy po surowce i zakupy za kredyty.
+Nowy tryb gry: nieskończony kosmos, własna stacja kosmiczna jako baza, wyprawy po surowce i zakupy za kredyty.
 
-  * Startujesz z bazy na planecie. Wokół niej jest strefa bezpieczna bez asteroid.
+  * Startujesz ze stacji kosmicznej (lądowiska na pierścieniu dokującym). Wokół niej jest strefa bezpieczna bez asteroid.
   * Dalej zaczynają się asteroidy (im dalej od bazy, tym twardsze i bogatsze) oraz rzadkie, wielkie planety.
   * Strzelaj w planety, żeby wykuwać surowce, i zbieraj je (ładownia ma ograniczoną pojemność).
   * Wokół ok. 40% planet krąży gęste skupisko asteroid (na minimapie widać je jako pierścień), a w nim
@@ -64,6 +64,7 @@ os.environ.setdefault("SDL_VIDEO_CENTERED", "1")
 
 import pygame
 
+import station
 import view
 from balance import *
 from config import *
@@ -121,7 +122,6 @@ def present(canvas):
 # --------------------
 # Gra
 # --------------------
-BASE_OBJ = SimpleNamespace(x=0.0, y=0.0, R=BASE_R)
 MISSILE_TRAIL = (YELLOW, ORANGE, RED, PLUM, DARK)
 
 
@@ -204,9 +204,10 @@ def main():
         return big
 
     stars_far_big, stars_near_big = star_layer("stars_far_big.png"), star_layer("stars_near_big.png")
-    base_img = load("base_planet.png")
+    base_img = load("base_station.png")   # stacja kosmiczna (tools/make_sprites.py); dawniej base_planet.png
     bld_img = {k: load(f"bld_{k}.png") for k in ("drill", "refinery", "vault", "hq", "scanner", "trade", "shield",
                                                  "warp", "engine")}
+    veh_frames = {v["id"]: strip(v["sheet"], 3, 0).frames for v in VEHICLES}   # pojazdy: 3 klatki kół/gąsienic
     planet_img, dead_img = planet_sheet("planets.png"), planet_sheet("planets_depleted.png", depleted=True)
     s_explosion = strip("explosion.png", 48, 0.5)
     s_rock = strip("rock.png", 16, 0.2)
@@ -269,8 +270,11 @@ def main():
         ct_sel=0, fr_tab=0, fr_sel=0, jump_confirm=0.0,
     )
     S.entities, S.ores = entities, ores  # dla testów i podglądu
-    menu_items = ["LAUNCH", "CONTRACTS", "UPGRADES", "SPECIALS", "HANGAR", "BASE", "FRONTIER", "SAVES", "SETTINGS",
-                  "EXIT GAME"]
+    S.rover = None      # łazik na stacji (stan "base")
+    S.near = None       # miejsce, przy którym stoi łazik (ENTER je otwiera)
+    S.stm_sel = 0       # wybór w menu ESC na stacji
+    S.garage_sel = 0    # wybór w garażu
+    st_menu_items = ["RESUME", "SAVES", "SETTINGS", "EXIT GAME"]
 
     def ship_by_id(sid):
         return next(s for s in SHIPS if s["id"] == sid)
@@ -436,8 +440,9 @@ def main():
         d = new_game_data()
         d.update(sector=save["sector"] + 1, relics=save["relics"] + gain, relic_lv=rl,
                  artifacts=list(save["artifacts"]), credits=HEAD_START[rl.get("start", 0)])
-        if rl.get("charter"):   # Fleet Charter: statki zostają (bez ulepszeń)
+        if rl.get("charter"):   # Fleet Charter: statki i pojazdy naziemne zostają (bez ulepszeń)
             d["owned"], d["ship"] = list(save["owned"]), save["ship"]
+            d["vehicles"], d["vehicle"] = list(save["vehicles"]), save["vehicle"]
         apply_save(d)
         refresh_meta(save)
         fill_contracts()
@@ -456,7 +461,8 @@ def main():
         dt = real_dt   # rzeczywisty upływ czasu tej klatki (nie zakładane 1/60), więc tempo nie zależy od FPS
         rate = income_rate(save["base"]) / 60.0
         if rate > 0:
-            if S.state in ("base", "specials", "saves", "upgrades", "hangar", "build", "contracts", "frontier"):
+            if S.state in ("base", "stmenu", "specials", "saves", "upgrades", "hangar", "build", "contracts", "frontier",
+                           "settings", "garage"):
                 add_credits(rate * dt)
             else:
                 save["vault"] = min(float(vault_cap(save["base"])), save["vault"] + rate * dt)
@@ -1069,8 +1075,7 @@ def main():
 
     def start_landing():
         p = S.player
-        ang = math.atan2(p.y, p.x)
-        S.pad = min(range(N_PADS), key=lambda k: abs((ang - pad_angle(k) + math.pi) % math.tau - math.pi))
+        S.pad = min(range(N_PADS), key=lambda k: math.hypot(p.x - pad_pos(k)[0], p.y - pad_pos(k)[1]))   # najbliższe lądowisko
         S.phase, S.t = "landing", 0
         S.land_from = (p.x, p.y)
         S.land_a0 = p.angle
@@ -1224,6 +1229,7 @@ def main():
         S.wave_queue = []
         S.beam_targets = []
         S.ship = ship_by_id(save["ship"])
+        S.rover = None   # nowy zapis / sektor: pojazd wyjedzie od nowa przy lądowisku
         for grp in (entities, ores, particles, waves, ghosts, floats, pending, fx):
             grp.clear()
         refresh_meta(save)
@@ -1270,7 +1276,7 @@ def main():
             oy = int(-(CAM[1] * K * f) % ih)
             screen.blit(img, (ox - iw, oy - ih))
 
-    # sloty budynków na planecie (px płótna względem środka): skarbce w środku, rafinerie dalej, wiertnie na obrzeżu
+    # sloty budynków na pokładzie stacji (px płótna względem środka): skarbce w środku, rafinerie dalej, wiertnie na obrzeżu
     def ring_slots(n, r, off):
         return [(round(math.cos(off + i * math.tau / n) * r), round(math.sin(off + i * math.tau / n) * r)) for i in range(n)]
 
@@ -1344,10 +1350,10 @@ def main():
         return base_layer["surf"]
 
     def draw_buildings(cx, cy, t_ms):
-        """Rozbudowa bazy widać na planecie: centrum dowodzenia, drogi, domki i budynki wszystkich modułów."""
+        """Rozbudowę bazy widać na pokładzie stacji: centrum dowodzenia, drogi, domki i budynki wszystkich modułów."""
         b = save["base"]
         blink = (t_ms // 500) % 2 == 0
-        n_house = min(len(houses), 24 + 16 * sum(b.values()) + 8 * save["drones"])
+        n_house = 0   # domki z dawnej planety-bazy; na pokładzie stacji wyglądały jak śmieci, rozbudowę widać po budynkach
         screen.blit(base_static_layer(n_house), (cx - LAYER_R, cy - LAYER_R))
         phase = t_ms // 700
         for i, (hx, hy) in enumerate(houses[:n_house]):
@@ -1403,6 +1409,21 @@ def main():
                 screen.fill(NAVY, (cx - 2, cy - 2, 5, 5))
                 screen.fill(col, (cx - 1, cy - 1, 3, 3))
 
+    def pad_lights(x, y, active, t_ms):
+        """8 świateł na obwodzie dużego lądowiska: migają na czerwono-zielono, przy lądowaniu biegną na cyjan."""
+        rr = station.SL.PAD_RADIUS - 2
+        for i in range(8):
+            a = i * math.tau / 8 + math.pi / 8
+            lx, ly = round(x + math.cos(a) * rr), round(y + math.sin(a) * rr)
+            if active:
+                on = (t_ms // 70 - i) % 8 < 3
+                col = CYAN if on else BLUE_D
+            else:
+                col = LIME if ((t_ms // 500) + i) % 2 else RED
+            screen.fill(col, (lx - 1, ly - 1, 3, 3))
+        if active:
+            draw_glow(screen, x, y, 70, (90, 200, 255), 0.35)
+
     def draw_pad(x, y, active, blink):
         """Lądowisko: płyta z oznaczeniem i migającymi światłami po rogach."""
         pygame.draw.rect(screen, NAVY, (x - 8, y - 8, 17, 17))
@@ -1423,12 +1444,12 @@ def main():
             if save["base"]["ring"]:
                 draw_ring(cx, cy, save["base"]["ring"], t_ms)
             draw_buildings(cx, cy, t_ms)
-            blink = (t_ms // 350) % 2 == 0
-            for k in range(N_PADS):
-                px, py = pad_pos(k)
-                x, y = sp(px, py)
+            for k in range(N_PADS):   # światła wokół dużych lądowisk (same lądowiska są w grafice stacji)
+                x, y = sp(*pad_pos(k))
                 active = S.state == "flight" and S.phase in ("landing", "unload", "launch") and k == S.pad
-                draw_pad(x, y, active, blink)
+                pad_lights(x, y, active, t_ms)
+            if S.state in ("flight", "paused"):
+                draw_parked(False)   # statki przed hangarem i pojazdy na placu widać też z kosmosu
             # okrąg zasięgu automatycznego lądowania
             if S.state == "flight" and S.phase == "fly" and not S.undock_lock:
                 r = DOCK_R * K
@@ -1517,7 +1538,7 @@ def main():
         return cx, cy, ux, uy
 
     def draw_base_arrow():
-        """Strzałka przy krawędzi ekranu wskazująca bazę, gdy planeta-baza jest poza widokiem."""
+        """Strzałka przy krawędzi ekranu wskazująca bazę, gdy stacja jest poza widokiem."""
         bx, by = sp(0, 0)
         dx, dy = bx - view.VW // 2, by - view.VH // 2
         if math.hypot(dx, dy) - BASE_ART_R < view.VH // 2:  # krawędź planety jest w kadrze
@@ -2028,18 +2049,26 @@ def main():
                             splashes.append((b.x, b.y, None))
                         break
         if fly:  # planety są twarde: statek odbija się od nich
-            for pl in planets + [BASE_OBJ]:
+            hits = []
+            for pl in planets:
                 dxp, dyp = p.x - pl.x, p.y - pl.y
                 d = math.hypot(dxp, dyp) or 1.0
                 lim = pl.R + p.R
                 if d < lim:
                     nx, ny = dxp / d, dyp / d
                     p.x, p.y = pl.x + nx * lim, pl.y + ny * lim
-                    vn = p.dx * nx + p.dy * ny
-                    if vn < 0:
-                        p.dx -= 1.5 * vn * nx
-                        p.dy -= 1.5 * vn * ny
-                    p.dash_t = 0
+                    hits.append((nx, ny))
+            if math.hypot(p.x, p.y) < BASE_R + p.R:   # stacja: centrum, mosty i platformy dzielnic
+                push = station.hull_push(p.x, p.y, p.R)
+                if push:
+                    p.x, p.y = push[0], push[1]
+                    hits.append(push[2:])
+            for nx, ny in hits:
+                vn = p.dx * nx + p.dy * ny
+                if vn < 0:
+                    p.dx -= 1.5 * vn * nx
+                    p.dy -= 1.5 * vn * ny
+                p.dash_t = 0
         for sx, sy, src in splashes:
             burst(sx, sy, 14, (YELLOW, ORANGE, RED, PLUM))
             fx.append(FxRing(sx, sy, 10, 110, 10, (ORANGE, YELLOW), 2))
@@ -2548,6 +2577,269 @@ def main():
         cy = CH + BASE_ART_R - (26 if low else 58)  # tylko wierzch planety wyłania się zza dołu ekranu
         screen.blit(base_img, base_img.get_rect(center=(view.CW // 2, cy)))
 
+    # ---------- stacja: jazda pojazdem między dzielnicami (zamiast menu głównego) ----------
+    st_parts = []            # ślady gąsienic / kół i kurz na pokładzie
+    st_cache = {"canvas": None, "ship": {}}
+    ST_ZOOM = 3              # stacja jest rysowana 3x bliżej niż kosmos w locie (piksele jak w HUD)
+
+    def vehicle_spec():
+        return next(v for v in VEHICLES if v["id"] == save["vehicle"])
+
+    def spawn_rover():
+        """Pojazd wyjeżdża tuż obok lądowiska, na którym stoi statek, przodem w stronę mostu do centrum."""
+        px, py = pad_pos(S.pad)
+        S.rover = station.Rover(px, py - 95 / K, 180.0, vehicle_spec())
+        CAM[0], CAM[1] = S.rover.x, S.rover.y
+        st_parts.clear()
+
+    def parked_ships():
+        """Posiadane statki poza tym, którym latasz: stoją na płycie przed hangarem."""
+        return [sid for sid in save["owned"] if sid != save["ship"]][:len(station.SHIP_SPOTS)]
+
+    def parked_vehicles():
+        return [vid for vid in save["vehicles"] if vid != save["vehicle"]][:len(station.VEHICLE_SPOTS)]
+
+    def station_obstacles():
+        obs = [(0.0, 0.0, station.HQ_R)] + station.ITEM_OBSTACLES
+        for key, r, n_slots, off in BUILD_LAYOUT:   # zbudowane moduły bazy w centrum
+            for dx, dy in slots[key][:min(save["base"][key], n_slots)]:
+                obs.append((dx / K, dy / K, station.MODULE_R))
+        obs += [(x, y, station.PARKED_R) for (x, y), _ in zip(station.SHIP_SPOTS, parked_ships())]
+        obs += [(x, y, station.PARKED_R * 0.7) for (x, y), _ in zip(station.VEHICLE_SPOTS, parked_vehicles())]
+        sx, sy = pad_pos(S.pad)
+        obs.append((sx, sy, station.SHIP_ON_PAD_R))
+        return obs
+
+    def nearest_place():
+        r = S.rover
+        sx, sy = pad_pos(S.pad)
+        cands = [(key, x, y, station.PLACE_R[key]) for key, (x, y) in station.PLACE_XY.items()]
+        cands += [("hq", 0.0, 0.0, station.HQ_R), ("ship", sx, sy, station.SHIP_ON_PAD_R)]
+        best, bd = None, 1e9
+        for key, x, y, rad in cands:
+            d = math.hypot(r.x - x, r.y - y) - rad - r.R
+            if d < bd:
+                best, bd = key, d
+        return best if bd < station.USE_RANGE else None
+
+    def use_place(key):
+        """ENTER przy budynku: otwiera ten sam ekran, który dawniej był pozycją w menu głównym."""
+        S.notice[2] = 0
+        if key == "ship":
+            do_launch()
+        elif key == "hangar":
+            S.hangar_sel = next(i for i, s_ in enumerate(SHIPS) if s_["id"] == save["ship"])
+            S.state = "hangar"
+        elif key == "workshop":
+            S.state = "upgrades"
+        elif key == "lab":
+            S.spec_ship = next(i for i, s_ in enumerate(SHIPS) if s_["id"] == save["ship"])
+            S.spec_sel = 0
+            S.state = "specials"
+        elif key == "mission":
+            S.ct_sel = 0
+            S.state = "contracts"
+        elif key == "gate":
+            S.fr_sel = 0
+            S.jump_confirm = 0.0
+            S.state = "frontier"
+        elif key == "hq":
+            S.state = "build"
+        elif key == "garage":
+            S.garage_sel = next(i for i, v in enumerate(VEHICLES) if v["id"] == save["vehicle"])
+            S.state = "garage"
+
+    def select_vehicle(i):
+        v = VEHICLES[i]
+        if v["id"] in save["vehicles"]:
+            save["vehicle"] = v["id"]
+            set_notice("VEHICLE READY - DRIVE OUT OF THE GARAGE", LIME)
+        elif save["credits"] >= v["cost"]:
+            save["credits"] -= v["cost"]
+            save["vehicles"].append(v["id"])
+            save["vehicle"] = v["id"]
+            set_notice("VEHICLE BOUGHT AND READY!", LIME)
+        else:
+            set_notice(f"NEED {v['cost']} CREDITS", RED)
+            return
+        if S.rover is not None and S.rover.spec["id"] != save["vehicle"]:   # nowy pojazd wyjeżdża spod garażu
+            gx, gy = station.PLACE_XY["garage"]
+            S.rover = station.Rover(gx, gy + 70 / K, 90.0, vehicle_spec())
+        persist()
+
+    def station_step():
+        keys = pygame.key.get_pressed()
+        r = S.rover
+        turn = (1 if (keys[pygame.K_d] or keys[pygame.K_RIGHT]) else 0) - (1 if (keys[pygame.K_a] or keys[pygame.K_LEFT]) else 0)
+        r.update(keys[pygame.K_w] or keys[pygame.K_UP], keys[pygame.K_s] or keys[pygame.K_DOWN], turn, station_obstacles())
+        rad = math.radians(r.angle)
+        fx_, fy_ = math.cos(rad), math.sin(rad)
+        if abs(r.v) > 0.8 or turn:   # ślady i kurz spod tyłu pojazdu
+            back, side = r.R * 0.9, r.R * 0.72
+            for sgn in (-1, 1):
+                if random.random() < 0.55 * view.DT_SCALE:
+                    bx, by = r.x - fx_ * back - fy_ * side * sgn, r.y - fy_ * back + fx_ * side * sgn
+                    st_parts.append(Particle(bx, by, 0.0, 0.0, 160, (DARK, DARK, (41, 46, 70))))
+                    if random.random() < 0.4:
+                        st_parts.append(Particle(bx, by, -fx_ * r.v * 0.25 + random.uniform(-0.5, 0.5),
+                                                 -fy_ * r.v * 0.25 + random.uniform(-0.5, 0.5), 22, (GREY, DARK)))
+        for q in st_parts:
+            q.update()
+        st_parts[:] = [q for q in st_parts if q.life > 0][-500:]
+        tx, ty = r.x + fx_ * r.v * 10, r.y + fy_ * r.v * 10   # kamera lekko wyprzedza pojazd
+        follow = 1 - 0.86 ** view.DT_SCALE
+        CAM[0] += (tx - CAM[0]) * follow
+        CAM[1] += (ty - CAM[1]) * follow
+        near = nearest_place()
+        if near != S.near:   # odjechałeś od budynku: jego komunikat znika
+            S.notice[2] = 0
+        S.near = near
+
+    def ship_img_at(sid, angle_deg):
+        key = (sid, round(angle_deg))
+        img = st_cache["ship"].get(key)
+        if img is None:
+            img = st_cache["ship"][key] = rotated(ship_frames[sid][0], angle_deg + 90)
+        return img
+
+    def draw_parked(parked_ship_on_pad):
+        """Statki na płycie hangaru, pojazdy na placu i (na stacji) Twój statek na lądowisku. Rysowane na 'screen'."""
+        for (x, y), sid in zip(station.SHIP_SPOTS, parked_ships()):
+            img = ship_img_at(sid, -90.0)
+            cx, cy = sp(x, y)
+            if visible(cx, cy, 60):
+                screen.blit(img, img.get_rect(center=(cx, cy)))
+        for (x, y), vid in zip(station.VEHICLE_SPOTS, parked_vehicles()):
+            img = veh_frames[vid][0]
+            cx, cy = sp(x, y)
+            if visible(cx, cy, 40):
+                screen.blit(img, img.get_rect(center=(cx, cy)))
+        if parked_ship_on_pad:
+            img = ship_img_at(save["ship"], math.degrees(pad_angle(S.pad)))
+            cx, cy = sp(*pad_pos(S.pad))
+            if visible(cx, cy, 60):
+                screen.blit(img, img.get_rect(center=(cx, cy)))
+
+    def draw_station(menu=False):
+        """Pokład stacji z bliska: rysujemy na płótnie 3x mniejszym i powiększamy je (piksele zostają ostre)."""
+        nonlocal screen
+        full_w, full_h = view.VW, view.VH
+        hw, hh = full_w // ST_ZOOM, full_h // ST_ZOOM
+        canvas = st_cache["canvas"]
+        if canvas is None or canvas.get_size() != (hw, hh):
+            canvas = st_cache["canvas"] = pygame.Surface((hw, hh)).convert()
+        hud_layer = screen
+        screen = canvas
+        view.VW, view.VH = hw, hh   # sp(), visible() i reszta rysowania liczą środek dla mniejszego płótna
+        t_ms = pygame.time.get_ticks()
+        labels = []
+        try:
+            draw_space()
+            draw_base_planet(t_ms)
+            pulse = 0.5 + 0.5 * math.sin(t_ms / 180.0)
+            for key, (x, y) in list(station.PLACE_XY.items()) + [("hq", (0.0, 0.0)), ("ship", pad_pos(S.pad))]:
+                cx, cy = sp(x, y)
+                if key == S.near:
+                    draw_glow(screen, cx, cy, 44 if key != "gate" else 70, (90, 200, 255), 0.35 + 0.2 * pulse)
+                rad_px = station.SL.PAD_RADIUS if key == "ship" else station.PLACE_R.get(key, station.HQ_R) * K
+                labels.append((key, cx, cy - rad_px - 12))
+            draw_parked(True)
+            draw_drones()
+            for q in st_parts:
+                q.draw(screen)
+            r = S.rover
+            frames = veh_frames[r.spec["id"]]
+            img = rotated(frames[int(r.tread) % len(frames)], r.angle + 90)
+            cx, cy = sp(r.x, r.y)
+            shadow = silhouette(img, (16, 16, 30))
+            screen.blit(shadow, shadow.get_rect(center=(cx + 2, cy + 2)))
+            screen.blit(img, img.get_rect(center=(cx, cy)))
+            rad = math.radians(r.angle)
+            draw_glow(screen, cx + math.cos(rad) * r.R * K * 0.8, cy + math.sin(rad) * r.R * K * 0.8, 12,
+                      (255, 225, 150), 0.35)   # reflektory
+        finally:
+            view.VW, view.VH = full_w, full_h
+        pygame.transform.scale(canvas, (full_w, full_h), world)
+        if menu:
+            world.blit(veil, (0, 0))
+        screen = hud_layer
+        screen.fill(KEY)
+
+        def hud(p_x, p_y):   # piksel płótna stacji -> piksel warstwy HUD
+            return round(p_x * ST_ZOOM / ZOOM), round(p_y * ST_ZOOM / ZOOM)
+
+        if menu:
+            text("HOME BASE", 24, YELLOW, (0, 70), center=True, shadow=RED)
+            blink = (t_ms // 400) % 2 == 0
+            for i, label in enumerate(st_menu_items):
+                if i == S.stm_sel:
+                    label = f"> {label} <" if blink else f"  {label}  "
+                text(label, 16, YELLOW if i == S.stm_sel else WHITE, (0, 120 + i * 20), center=True)
+            text("UP/DOWN + ENTER   ESC - BACK TO THE STATION", 8, GREY, (0, 230), center=True)
+            compose_hud()
+            return
+        for key, lx, ly in labels:   # nazwy budynków nad nimi
+            x_, y_ = hud(lx, ly)
+            if -60 < x_ < view.CW + 60 and -10 < y_ < CH + 10:
+                text(station.PLACE_NAMES[key], 8, YELLOW if key == S.near else GREY, (x_, y_), mid=True)
+        zone = current_zone_name()
+        if zone:   # nazwa dzielnicy, w której jesteś
+            text(zone, 8, CYAN, (0, CH - 26), center=True)
+        text(f"CREDITS {save['credits']}", 8, YELLOW, (6, 6))
+        info = []
+        if income_rate(save["base"]):
+            info.append(f"INCOME {income_rate(save['base'])}/MIN")
+        if save["drones"]:
+            info.append(f"DRONES {save['drones']}")
+        if save["sector"] > 1 or save["relics"]:
+            info.append(f"SECTOR {save['sector']}  RELICS {save['relics']}")
+        for j, line in enumerate(info):
+            text(line, 8, GREY, (6, 18 + j * 12))
+        for j, (line, col) in enumerate(S.lines[-3:]):
+            text(line, 8, col, (0, 8 + j * 10), center=True)
+        draw_station_map(t_ms)
+        if S.near:
+            msg = f"ENTER - {station.PLACE_NAMES[S.near]}"
+            bw_ = len(msg) * 16 + 16   # czcionka jest stałej szerokości: 16 px na znak
+            box = pygame.Rect((view.CW - bw_) // 2, CH - 70, bw_, 28)
+            pygame.draw.rect(screen, NAVY, box)
+            pygame.draw.rect(screen, YELLOW, box, 1)
+            text(msg, 16, YELLOW if (t_ms // 350) % 2 == 0 else ORANGE, (0, CH - 64), center=True, shadow=RED)
+        if S.notice[2] > 0:
+            text(S.notice[0], 8, S.notice[1], (0, CH - 38), center=True)
+            S.notice[2] -= view.DT_SCALE
+        text("W/A/S/D DRIVE   ENTER USE   ESC MENU", 8, GREY, (0, CH - 14), center=True)
+        compose_hud()
+
+    def current_zone_name():
+        z = station.SL.which_zone(S.rover.x * K, S.rover.y * K)
+        return station.SL.ZONES[z]["name"] if z else None
+
+    def draw_station_map(t_ms):
+        """Minimapa stacji: centrum, mosty, dzielnice (budynek miga, gdy przy nim stoisz), statek i pojazd."""
+        mc, mr = (view.CW - 46, 46), 40
+        sc_ = mr / BASE_ART_R   # px obrazka stacji -> px minimapy
+        pygame.draw.circle(screen, NAVY, mc, mr + 3)
+        pygame.draw.circle(screen, DARK, mc, mr + 3, 1)
+        for x0, y0, x1, y1 in station.SL.bridges():
+            pygame.draw.line(screen, DARK, (mc[0] + x0 * sc_, mc[1] + y0 * sc_), (mc[0] + x1 * sc_, mc[1] + y1 * sc_), 2)
+        pygame.draw.circle(screen, (58, 68, 96), mc, max(2, round(station.SL.CORE_R * sc_)))
+        for z in station.SL.ZONES.values():
+            rect = pygame.Rect(0, 0, max(3, round(z["w"] * sc_)), max(3, round(z["h"] * sc_)))
+            rect.center = (mc[0] + round(z["cx"] * sc_), mc[1] + round(z["cy"] * sc_))
+            pygame.draw.rect(screen, (58, 68, 96), rect)
+        for key, (x, y) in station.PLACE_XY.items():
+            col = YELLOW if (key == S.near and (t_ms // 250) % 2) else ORANGE
+            pygame.draw.rect(screen, col, (mc[0] + round(x * K * sc_) - 1, mc[1] + round(y * K * sc_) - 1, 3, 3))
+        pygame.draw.rect(screen, CYAN, (mc[0] - 1, mc[1] - 1, 3, 3))
+        px_, py_ = pad_pos(S.pad)
+        pygame.draw.rect(screen, WHITE, (mc[0] + round(px_ * K * sc_) - 1, mc[1] + round(py_ * K * sc_) - 1, 3, 3))
+        r = S.rover
+        rad = math.radians(r.angle)
+        rx_, ry_ = mc[0] + r.x * K * sc_, mc[1] + r.y * K * sc_
+        pygame.draw.line(screen, LIME, (rx_, ry_), (rx_ + math.cos(rad) * 5, ry_ + math.sin(rad) * 5), 1)
+        screen.fill(LIME, (round(rx_) - 1, round(ry_) - 1, 3, 3))
+
     fill_contracts()
 
     # --- dochód z bazy nagromadzony pod nieobecność gracza (do pojemności skarbca) ---
@@ -2564,7 +2856,9 @@ def main():
 
     running = True
     real_dt = 1.0 / FPS
+    frame_state = None   # stan z początku poprzedniej klatki (żeby wiedzieć, że właśnie wylądowaliśmy)
     while running:
+        came_from, frame_state = frame_state, S.state
         raw_ms = clock.tick(render_fps)
         if raw_ms is None:   # niektóre nakładki testowe/mocki zwracają None zamiast ms
             raw_ms = 1000.0 / FPS
@@ -2583,47 +2877,30 @@ def main():
                     fullscreen = not fullscreen
                     open_window(fullscreen, windowed_size)
                     apply_view()
-                elif S.state == "base":
+                elif S.state == "base":   # stacja: jeździsz łazikiem, ENTER przy budynku otwiera jego ekran
+                    if key in (pygame.K_RETURN, pygame.K_KP_ENTER) and S.near and S.rover is not None:
+                        use_place(S.near)
+                    elif key == pygame.K_ESCAPE:
+                        S.stm_sel = 0
+                        S.state = "stmenu"
+                elif S.state == "stmenu":   # menu ESC na stacji: zapisy, ustawienia, wyjście
                     if key == pygame.K_UP:
-                        S.sel = (S.sel - 1) % len(menu_items)
+                        S.stm_sel = (S.stm_sel - 1) % len(st_menu_items)
                     elif key == pygame.K_DOWN:
-                        S.sel = (S.sel + 1) % len(menu_items)
+                        S.stm_sel = (S.stm_sel + 1) % len(st_menu_items)
+                    elif key == pygame.K_ESCAPE:
+                        S.state = "base"
                     elif key in (pygame.K_RETURN, pygame.K_KP_ENTER):
-                        choice = menu_items[S.sel]
-                        if choice == "LAUNCH":
-                            do_launch()
-                        elif choice == "CONTRACTS":
-                            S.notice[2] = 0
-                            S.ct_sel = 0
-                            S.state = "contracts"
-                        elif choice == "FRONTIER":
-                            S.notice[2] = 0
-                            S.fr_sel = 0
-                            S.jump_confirm = 0.0
-                            S.state = "frontier"
-                        elif choice == "UPGRADES":
-                            S.notice[2] = 0
-                            S.state = "upgrades"
-                        elif choice == "SPECIALS":
-                            S.spec_ship = next(i for i, s_ in enumerate(SHIPS) if s_["id"] == save["ship"])
-                            S.spec_sel = 0
-                            S.notice[2] = 0
-                            S.state = "specials"
-                        elif choice == "HANGAR":
-                            S.hangar_sel = next(i for i, s_ in enumerate(SHIPS) if s_["id"] == save["ship"])
-                            S.notice[2] = 0
-                            S.state = "hangar"
-                        elif choice == "BASE":
-                            S.notice[2] = 0
-                            S.state = "build"
+                        choice = st_menu_items[S.stm_sel]
+                        S.notice[2] = 0
+                        if choice == "RESUME":
+                            S.state = "base"
                         elif choice == "SETTINGS":
                             S.fps_sel = RENDER_FPS_OPTIONS.index(render_fps)
-                            S.notice[2] = 0
                             S.state = "settings"
                         elif choice == "SAVES":
                             refresh_slots()
                             S.slot_sel = S.slot - 1
-                            S.notice[2] = 0
                             S.confirm = (-1, 0)
                             S.state = "saves"
                         else:
@@ -2657,6 +2934,15 @@ def main():
                         S.hangar_sel = (S.hangar_sel + 1) % len(SHIPS)
                     elif key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                         select_ship(S.hangar_sel)
+                    elif key == pygame.K_ESCAPE:
+                        S.state = "base"
+                elif S.state == "garage":
+                    if key == pygame.K_LEFT:
+                        S.garage_sel = (S.garage_sel - 1) % len(VEHICLES)
+                    elif key == pygame.K_RIGHT:
+                        S.garage_sel = (S.garage_sel + 1) % len(VEHICLES)
+                    elif key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                        select_vehicle(S.garage_sel)
                     elif key == pygame.K_ESCAPE:
                         S.state = "base"
                 elif S.state == "build":
@@ -2770,30 +3056,15 @@ def main():
             economy_tick()
 
         if S.state == "base":
-            draw_base_backdrop()
-            text("HOME BASE", 24, YELLOW, (0, 8), center=True, shadow=RED)
-            text(f"CREDITS {save['credits']}", 16, CYAN, (0, 36), center=True)
-            info = []
-            if income_rate(save["base"]):
-                info.append(f"INCOME {income_rate(save['base'])}/MIN")
-            if save["drones"]:
-                info.append(f"DRONES {save['drones']}")
-            if save["sector"] > 1 or save["relics"]:
-                info.append(f"SECTOR {save['sector']}  RELICS {save['relics']}")
-            if info:
-                text("   ".join(info), 8, GREY, (0, 55), center=True)
-            blink = (pygame.time.get_ticks() // 400) % 2 == 0
-            item_y0, item_step = 66, 16   # więcej pozycji w menu (SPECIALS, SETTINGS) -> mniejszy odstęp, żeby zmieścić stopkę
-            for i, label in enumerate(menu_items):
-                if i == S.sel:
-                    label = f"> {label} <" if blink else f"  {label}  "
-                text(label, 16, YELLOW if i == S.sel else WHITE, (0, item_y0 + i * item_step), center=True)
-            lines_y0 = item_y0 + len(menu_items) * item_step + 8
-            for j, (line, col) in enumerate(S.lines[-3:]):
-                text(line, 8, col, (0, lines_y0 + j * 9), center=True)
-            footer_y = lines_y0 + 3 * 9 + 6
-            text("UP/DOWN + ENTER", 8, GREY, (0, footer_y), center=True)
-            text("F11 - FULLSCREEN", 8, GREY, (0, footer_y + 10), center=True)
+            if S.rover is None or came_from in ("flight", "paused"):   # po lądowaniu łazik wyjeżdża przy statku
+                spawn_rover()
+            station_step()
+            draw_station()
+
+        elif S.state == "stmenu":
+            if S.rover is None:
+                spawn_rover()
+            draw_station(menu=True)
 
         elif S.state == "hangar":
             draw_base_backdrop(low=True)
@@ -2834,6 +3105,48 @@ def main():
                 text("OWNED - ENTER TO EQUIP", 8, CYAN, (mx + 244, 224))
             else:
                 text(f"ENTER TO BUY: {sh['cost']} CR", 8, YELLOW if save["credits"] >= sh["cost"] else RED, (mx + 244, 224))
+            if S.notice[2] > 0:
+                text(S.notice[0], 8, S.notice[1], (0, 258), center=True)
+                S.notice[2] -= view.DT_SCALE
+            text("LEFT/RIGHT CHOOSE  ENTER SELECT  ESC BACK", 8, GREY, (0, CH - 16), center=True)
+
+        elif S.state == "garage":   # pojazdy naziemne: ten sam układ co hangar
+            draw_base_backdrop(low=True)
+            mx = (view.CW - 480) // 2
+            text("GARAGE", 24, YELLOW, (0, 14), center=True, shadow=RED)
+            text(f"CREDITS: {save['credits']}", 8, CYAN, (view.CW - 6, 6), right=True)
+            vh = VEHICLES[S.garage_sel]
+            owned = vh["id"] in save["vehicles"]
+            panel((mx + 24, 60, 190, 190))
+            t = pygame.time.get_ticks()
+            frames = veh_frames[vh["id"]]
+            img = rotated(frames[(t // 90) % len(frames) if owned else 0], t // 30)   # koła / gąsienice się kręcą
+            img = pygame.transform.scale(img, (img.get_width() * 4, img.get_height() * 4))
+            if not owned:
+                img = img.copy()
+                img.fill((90, 90, 110), special_flags=pygame.BLEND_RGB_MULT)
+            screen.blit(img, img.get_rect(center=(mx + 119, 155)))
+            if not owned:
+                text("LOCKED", 8, ORANGE, (mx + 119 - 24, 232))
+            for j in range(len(VEHICLES)):
+                pygame.draw.rect(screen, YELLOW if j == S.garage_sel else DARK, (mx + 119 - len(VEHICLES) * 6 + j * 12, 68, 8, 4))
+            if (t // 400) % 2 == 0:
+                text("<", 16, WHITE, (mx + 6, 146))
+                text(">", 16, WHITE, (mx + 216, 146))
+            panel((mx + 232, 60, 224, 190))
+            text(vh["name"], 16 if len(vh["name"]) <= 12 else 8, YELLOW, (mx + 244, 72))
+            for i, (label, val) in enumerate(zip(VEHICLE_STATS, vh["stats"])):
+                y = 108 + i * 18
+                text(label, 8, GREY, (mx + 244, y))
+                pips(mx + 316, y, val, 5, LIME, DARK, w=12, gap=3, h=7)
+            for i, line in enumerate(vh["perk"]):
+                text(line, 8, WHITE, (mx + 244, 182 + i * 12))
+            if save["vehicle"] == vh["id"]:
+                text("IN USE", 8, LIME, (mx + 244, 224))
+            elif owned:
+                text("OWNED - ENTER TO DRIVE", 8, CYAN, (mx + 244, 224))
+            else:
+                text(f"ENTER TO BUY: {vh['cost']} CR", 8, YELLOW if save["credits"] >= vh["cost"] else RED, (mx + 244, 224))
             if S.notice[2] > 0:
                 text(S.notice[0], 8, S.notice[1], (0, 258), center=True)
                 S.notice[2] -= view.DT_SCALE
@@ -3188,7 +3501,7 @@ def main():
             text("Q - ABANDON RUN (CARGO LOST)", 8, GREY, (0, 166), center=True)
             compose_hud()
 
-        present(world if S.state in ("flight", "paused") else screen)
+        present(world if S.state in ("flight", "paused", "base", "stmenu") else screen)
 
     persist()
     pygame.quit()

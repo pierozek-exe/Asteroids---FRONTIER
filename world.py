@@ -258,9 +258,9 @@ def zone_tier(d):
 
 
 def pad_angle(k):
-    return PAD_OFFSET + k * (math.tau / N_PADS)
+    """Kierunek, w którym stoi statek na lądowisku i w którym startuje: na wschód, na zewnątrz kompleksu startowego."""
+    return 0.0
 
 
 def pad_pos(k):
-    a = pad_angle(k)
-    return math.cos(a) * PAD_R, math.sin(a) * PAD_R
+    return PAD_XY[k]
